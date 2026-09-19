@@ -34,14 +34,14 @@ Requirements:
 
 - Python 3.11 or newer
 - One writable directory for this project
-- Inbound TCP port `8765`, or another configured port
+- Inbound TCP port `52007`
 
 On Linux:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python server.py --host 0.0.0.0 --port 8765 --buffer ./buffer
+.venv/bin/python server.py --host 0.0.0.0 --port 52007 --buffer ./buffer
 ```
 
 On Windows Server:
@@ -49,10 +49,10 @@ On Windows Server:
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe server.py --host 0.0.0.0 --port 8765 --buffer .\buffer
+.\.venv\Scripts\python.exe server.py --host 0.0.0.0 --port 52007 --buffer .\buffer
 ```
 
-The first start creates the following inside `buffer/`:
+The server keeps its persistent runtime data in `buffer/` inside this project. The directory is excluded by `.gitignore`. The first start creates:
 
 - `state.json`: user identities, codes, nicknames, connections, and transfer metadata
 - `server-cert.pem`: self-signed TLS certificate
@@ -63,7 +63,7 @@ Do not delete or replace `state.json`, `server-cert.pem`, or `server-key.pem` du
 
 ### systemd service
 
-Adjust the user and paths before installing:
+The repository includes `deploy/file-sharing.service`, configured to run as the local `user` account from `/opt/file-sharing`. It is intended for manual, on-demand startup and is not enabled at boot by default:
 
 ```ini
 [Unit]
@@ -73,9 +73,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=file-sharing
+User=user
+Group=user
 WorkingDirectory=/opt/file-sharing
-ExecStart=/opt/file-sharing/.venv/bin/python /opt/file-sharing/server.py --host 0.0.0.0 --port 8765 --buffer /opt/file-sharing/buffer
+ExecStart=/opt/file-sharing/.venv/bin/python /opt/file-sharing/server.py --host 0.0.0.0 --port 52007 --buffer /opt/file-sharing/buffer
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -85,12 +86,19 @@ PrivateTmp=true
 WantedBy=multi-user.target
 ```
 
-Save it as `/etc/systemd/system/file-sharing.service`, then run:
+Install it as `/etc/systemd/system/file-sharing.service`, then start it when needed:
 
 ```bash
+sudo install -m 644 deploy/file-sharing.service /etc/systemd/system/file-sharing.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now file-sharing
+sudo systemctl start file-sharing
 sudo systemctl status file-sharing
+```
+
+Stop the relay when it is not needed:
+
+```bash
+sudo systemctl stop file-sharing
 ```
 
 View logs with:
@@ -107,7 +115,17 @@ py -m venv .venv
 .\.venv\Scripts\python.exe main.py
 ```
 
-On first launch, enter a nickname. The client defaults to `localhost:52007`. Open **Profile & server** to enter a custom relay or use **Use default** to restore the built-in address, then save and reconnect.
+On first launch, enter a nickname. The client uses a built-in relay. Open **Profile & server** to enter a custom relay or use **Use default** to restore the built-in address without displaying it, then save and reconnect.
+
+### Windows executable
+
+Build the standalone GUI client on Windows with:
+
+```powershell
+.\build_windows.ps1
+```
+
+The output is `dist\FileSharing.exe` with its SHA-256 checksum in `dist\FileSharing.exe.sha256`. The GitHub Actions workflow **Build Windows client** produces the same files for manual runs and version tags.
 
 Client state is stored at:
 

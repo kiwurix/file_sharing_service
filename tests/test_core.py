@@ -2,6 +2,7 @@ import asyncio
 import json
 import hashlib
 import io
+import os
 import ssl
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from unittest import mock
 
 from protocol import read_frame, send_frame
 from server import RelayServer, ensure_certificate
+import client
 from client import DEFAULT_PORT, DEFAULT_SERVER, calculate_display_metrics, friendly_error
 
 
@@ -18,6 +20,26 @@ class CoreTests(unittest.TestCase):
     def test_production_server_defaults(self):
         self.assertEqual("localhost", DEFAULT_SERVER)
         self.assertEqual(52007, DEFAULT_PORT)
+
+    def test_saved_relay_mode_distinguishes_default_from_manual_address(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / "connections.json"
+            config_path.write_text(json.dumps({
+                "server": DEFAULT_SERVER,
+                "port": DEFAULT_PORT,
+                "use_default_server": False,
+            }), "utf-8")
+            with mock.patch.object(client, "APP_DIR", Path(folder)), mock.patch.object(client, "CONFIG_PATH", config_path):
+                config = client.load_config()
+        self.assertFalse(config["use_default_server"])
+
+    def test_legacy_default_address_uses_masked_default_mode(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / "connections.json"
+            config_path.write_text(json.dumps({"server": DEFAULT_SERVER, "port": DEFAULT_PORT}), "utf-8")
+            with mock.patch.object(client, "APP_DIR", Path(folder)), mock.patch.object(client, "CONFIG_PATH", config_path):
+                config = client.load_config()
+        self.assertTrue(config["use_default_server"])
 
     def test_technical_errors_are_user_friendly(self):
         self.assertIn("server cannot be reached", friendly_error("not connected").lower())
@@ -66,6 +88,8 @@ class CoreTests(unittest.TestCase):
             cert, key = ensure_certificate(root)
             original = cert.read_bytes()
             self.assertTrue(key.exists())
+            if os.name != "nt":
+                self.assertEqual(0o600, key.stat().st_mode & 0o777)
             self.assertEqual((cert, key), ensure_certificate(root))
             self.assertEqual(original, cert.read_bytes())
 

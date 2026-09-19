@@ -292,6 +292,7 @@ def ensure_certificate(root: Path) -> tuple[Path, Path]:
                    .not_valid_after(now + timedelta(days=3650)).add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
                    .sign(private, hashes.SHA256()))
     key.write_bytes(private.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    key.chmod(0o600)
     cert.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
     return cert, key
 
@@ -311,7 +312,7 @@ async def run(host: str, port: int, buffer_dir: Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="File Sharing TLS relay")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=52007)
     parser.add_argument("--buffer", type=Path, default=Path(__file__).with_name("buffer"))
     args = parser.parse_args()
     asyncio.run(run(args.host, args.port, args.buffer))

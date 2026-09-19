@@ -86,10 +86,16 @@ def friendly_error(message: str) -> str:
 def load_config() -> dict:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     defaults = {"token": None, "code": "---", "name": "",
-                "server": DEFAULT_SERVER, "port": DEFAULT_PORT, "server_fingerprint": None, "connections": []}
+                "server": DEFAULT_SERVER, "port": DEFAULT_PORT, "use_default_server": True,
+                "server_fingerprint": None, "connections": []}
     if CONFIG_PATH.exists():
         try:
-            defaults.update(json.loads(CONFIG_PATH.read_text("utf-8")))
+            stored = json.loads(CONFIG_PATH.read_text("utf-8"))
+            defaults.update(stored)
+            if "use_default_server" not in stored:
+                defaults["use_default_server"] = (
+                    defaults["server"], defaults["port"]
+                ) == (DEFAULT_SERVER, DEFAULT_PORT)
         except (OSError, ValueError):
             pass
     return defaults
@@ -527,19 +533,45 @@ class App:
         host = tk.Entry(form, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat", font=("Segoe UI", 10))
         port = tk.Entry(form, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat", width=8, font=("Segoe UI", 10))
         host.grid(row=3, column=0, sticky="ew", ipady=self._p(8)); port.grid(row=3, column=1, padx=self._p((12, 0)), ipady=self._p(8))
-        form.columnconfigure(0, weight=1); host.insert(0, self.config["server"]); port.insert(0, str(self.config["port"]))
+        form.columnconfigure(0, weight=1)
+        default_selected = {"value": bool(self.config.get("use_default_server", False))}
+
+        def show_default():
+            default_selected["value"] = True
+            host.configure(show="")
+            port.configure(show="")
+            host.delete(0, "end"); host.insert(0, "••••••••••••")
+            port.delete(0, "end"); port.insert(0, "•••••")
+
+        def begin_custom(event):
+            if not default_selected["value"]:
+                return
+            if event.keysym in {"Tab", "ISO_Left_Tab", "Shift_L", "Shift_R", "Control_L", "Control_R",
+                                "Alt_L", "Alt_R", "Left", "Right", "Home", "End", "Escape", "Return"}:
+                return
+            default_selected["value"] = False
+            host.delete(0, "end")
+            port.delete(0, "end")
+
+        host.bind("<KeyPress>", begin_custom)
+        port.bind("<KeyPress>", begin_custom)
+        if default_selected["value"]:
+            show_default()
+        else:
+            host.insert(0, self.config["server"])
+            port.insert(0, str(self.config["port"]))
         hint_row = tk.Frame(dialog, bg=self.PANEL); hint_row.pack(fill="x", padx=self._p(28), pady=self._p(12))
-        self._label(hint_row, f"Default: {DEFAULT_SERVER}:{DEFAULT_PORT}", 9, self.MUTED).pack(side="left")
-        def use_default():
-            host.delete(0, "end"); host.insert(0, DEFAULT_SERVER)
-            port.delete(0, "end"); port.insert(0, str(DEFAULT_PORT))
-        self._button(hint_row, "Use default", use_default, self.CARD, padx=10, pady=5).pack(side="right")
+        self._label(hint_row, "Built-in relay", 9, self.MUTED).pack(side="left")
+        self._button(hint_row, "Use default", show_default, self.CARD, padx=10, pady=5).pack(side="right")
         self._label(dialog, "Changing the address resets the saved certificate pin.", 9, self.MUTED).pack(anchor="w", padx=self._p(28))
         def apply():
-            try: new_port = int(port.get())
-            except ValueError:
-                self._alert("Check the server port", "The port must be a number between 1 and 65535.", parent=dialog); return
-            new_host = host.get().strip()
+            if default_selected["value"]:
+                new_host, new_port = DEFAULT_SERVER, DEFAULT_PORT
+            else:
+                try: new_port = int(port.get())
+                except ValueError:
+                    self._alert("Check the server port", "The port must be a number between 1 and 65535.", parent=dialog); return
+                new_host = host.get().strip()
             new_name = nickname.get().strip()
             if not new_host or not 1 <= new_port <= 65535:
                 self._alert("Check the server details", "Enter a valid address and a port between 1 and 65535.", parent=dialog); return
@@ -547,7 +579,8 @@ class App:
                 self._alert("Choose a nickname", "Your nickname cannot be empty.", parent=dialog); return
             if (new_host, new_port) != (self.config["server"], self.config["port"]):
                 self.config["server_fingerprint"] = None
-            self.config.update(server=new_host, port=new_port, name=new_name[:24]); save_config(self.config)
+            self.config.update(server=new_host, port=new_port, use_default_server=default_selected["value"],
+                               name=new_name[:24]); save_config(self.config)
             self.nickname_label.config(text=self.config["name"])
             self.network.command({"type": "reconnect"}); dialog.destroy()
         self._button(dialog, "Save and reconnect", apply).pack(anchor="e", padx=self._p(28), pady=self._p((14, 10)))
