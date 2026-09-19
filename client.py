@@ -6,6 +6,7 @@ import asyncio
 import ctypes
 import hashlib
 import json
+import logging
 import os
 import queue
 import ssl
@@ -19,6 +20,7 @@ from tkinter import filedialog
 from tkinter import ttk
 
 from protocol import CHUNK_SIZE, read_frame, send_frame
+from logging_utils import configure_logging
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -112,9 +114,10 @@ def available_path(folder: str | Path, filename: str) -> Path:
 
 
 class NetworkClient:
-    def __init__(self, config: dict, events: queue.Queue):
+    def __init__(self, config: dict, events: queue.Queue, logger: logging.Logger):
         self.config = config
         self.events = events
+        self.log = logger
         self.loop: asyncio.AbstractEventLoop | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.write_lock: asyncio.Lock | None = None
@@ -145,6 +148,7 @@ class NetworkClient:
         self.write_lock = asyncio.Lock()
         while True:
             try:
+                self.log.info("Connecting to relay: address=%s port=%s", self.config["server"], self.config["port"])
                 context = ssl.create_default_context()
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
@@ -155,17 +159,21 @@ class NetworkClient:
                 fingerprint = hashlib.sha256(ssl_object.getpeercert(binary_form=True)).hexdigest()
                 pinned = self.config.get("server_fingerprint")
                 if pinned and pinned != fingerprint:
+                    self.log.error("Server certificate pin mismatch")
                     raise ssl.SSLError("server certificate changed; refusing the connection")
                 if not pinned:
                     self.config["server_fingerprint"] = fingerprint
                     save_config(self.config)
+                    self.log.info("Server certificate pinned on first connection")
                 await self.send({"type": "hello", "token": self.config.get("token"), "name": self.config["name"]})
                 self.events.put({"type": "network", "online": True})
+                self.log.info("Relay connection established with TLS")
                 while True:
                     message, payload = await read_frame(reader)
                     await self._handle(message, payload)
             except Exception as exc:
                 self.events.put({"type": "network", "online": False, "message": str(exc)})
+                self.log.warning("Relay connection unavailable: %s", exc)
             finally:
                 if self.writer:
                     self.writer.close()
@@ -180,6 +188,7 @@ class NetworkClient:
                     path = Path(raw)
                     if path.is_file() and path.suffix.lower() == ".zip" and zipfile.is_zipfile(path):
                         self.file_queue.append((message["recipient"], path))
+                self.log.info("Files queued: recipient=%s count=%d", message["recipient"], len(message["paths"]))
                 await self._offer_next()
             elif kind == "accept":
                 transfer_id = message["transfer_id"]
@@ -197,6 +206,7 @@ class NetworkClient:
                 if self.writer:
                     self.writer.close()
         except Exception as exc:
+            self.log.exception("Client command failed: command=%s", kind)
             self.events.put({"type": "error", "message": str(exc)})
 
     async def _offer_next(self) -> None:
@@ -214,6 +224,7 @@ class NetworkClient:
                 digest.update(block)
         await self.send({"type": "offer", "request_id": request_id, "recipient": recipient,
                          "filename": path.name, "size": path.stat().st_size, "sha256": digest.hexdigest()})
+        self.log.info("Transfer offered: recipient=%s size=%d", recipient, path.stat().st_size)
         self.events.put({"type": "sending_status", "text": f"Waiting for {recipient} to accept {path.name}"})
 
     async def _advance_queue(self) -> None:
@@ -233,7 +244,9 @@ class NetworkClient:
                     self.events.put({"type": "transfer_progress", "direction": "outgoing", "filename": path.name,
                                      "uploaded": uploaded, "downloaded": 0, "size": size})
             await self.send({"type": "finish", "transfer_id": transfer_id})
+            self.log.info("Upload sent: id=%s size=%d", transfer_id[:8], size)
         except Exception as exc:
+            self.log.exception("Upload failed: id=%s", transfer_id[:8])
             self.events.put({"type": "error", "message": f"Upload failed: {exc}"})
             await self._advance_queue()
 
@@ -297,6 +310,7 @@ class NetworkClient:
                 else:
                     os.replace(partial, destination)
                     await self.send({"type": "received", "transfer_id": message["transfer_id"]})
+                    self.log.info("Download verified and saved: id=%s size=%d", message["transfer_id"][:8], target["size"])
                     self.events.put({"type": "received_file", "path": str(destination)})
             return
         self.events.put(message)
@@ -319,6 +333,8 @@ class App:
         self.root.minsize(min(self._p(780), metrics["width"]), min(self._p(520), metrics["height"]))
         self.root.configure(bg=self.BG)
         self.config = load_config()
+        self.log = configure_logging("file_sharing.client", APP_DIR / "logs" / "client.log")
+        self.log.info("Client starting: server=%s port=%s", self.config["server"], self.config["port"])
         if not str(self.config.get("name", "")).strip():
             self.root.withdraw()
             nickname = self._prompt_nickname()
@@ -329,7 +345,7 @@ class App:
             save_config(self.config)
             self.root.deiconify()
         self.events: queue.Queue = queue.Queue()
-        self.network = NetworkClient(self.config, self.events)
+        self.network = NetworkClient(self.config, self.events, self.log)
         self.connection_rows: dict[str, tk.Frame] = {}
         self.selected_code: str | None = None
         self.is_online = False

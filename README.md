@@ -28,6 +28,13 @@ Encrypted ZIP-file sharing with a lightweight desktop client and a persistent re
 | `tests/` | Unit and end-to-end TLS transfer tests |
 | `buffer/` | Runtime-only server state, certificate, key, and pending files |
 
+## Logs
+
+- Server: `buffer/logs/server.log`
+- Client: `%LOCALAPPDATA%\file_sharing\logs\client.log`
+
+Logs rotate at 5 MiB and retain three backups. They include startup, connection state, rejected requests, transfer milestones, integrity checks, delivery, and cleanup. Identity tokens, certificate fingerprints, and file contents are never logged.
+
 ## Server deployment
 
 Requirements:

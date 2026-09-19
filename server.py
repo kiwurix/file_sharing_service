@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from protocol import CHUNK_SIZE, read_frame, send_frame
+from logging_utils import configure_logging
 
 PAIR_LIMIT = 1024 ** 3
 MAX_CONNECTIONS = 5
@@ -28,11 +29,15 @@ class RelayServer:
         self.files = self.root / "files"
         self.files.mkdir(exist_ok=True)
         self.state_path = self.root / "state.json"
+        self.log = configure_logging("file_sharing.server", self.root / "logs" / "server.log", console=True)
         self.state = self._load_state()
         self.online: dict[str, asyncio.StreamWriter] = {}
         self.writer_locks: dict[str, asyncio.Lock] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.progress_sent: dict[tuple[str, str], float] = {}
+        self.log.info("Relay state loaded: users=%d connections=%d pending_transfers=%d",
+                      len(self.state["users"]), sum(len(items) for items in self.state["connections"].values()) // 2,
+                      len(self.state["transfers"]))
 
     def _load_state(self) -> dict:
         if self.state_path.exists():
@@ -60,6 +65,7 @@ class RelayServer:
         if token and token in self.state["users"]:
             self.state["users"][token]["name"] = name[:40] or "User"
             self.save()
+            self.log.info("Known client authenticated: code=%s", self.state["users"][token]["code"])
             return token, self.state["users"][token]
         if len(self.state["codes"]) >= 1000:
             raise ValueError("all three-digit codes are in use")
@@ -71,6 +77,7 @@ class RelayServer:
         self.state["codes"][code] = token
         self.state["connections"][token] = []
         self.save()
+        self.log.info("New client registered: code=%s", code)
         return token, user
 
     async def tell(self, token: str, message: dict, payload: bytes = b"") -> bool:
@@ -110,6 +117,8 @@ class RelayServer:
             self.online[token] = writer
             self.writer_locks[token] = asyncio.Lock()
             await self.tell(token, {"type": "welcome", "token": token, "code": user["code"], "name": user["name"]})
+            peer = writer.get_extra_info("peername")
+            self.log.info("Client connected: code=%s address=%s", user["code"], peer[0] if peer else "unknown")
             await self.initial_events(token)
             for peer in self.user_connections(token):
                 await self.tell(peer, {"type": "presence", "code": user["code"], "name": user["name"], "online": True})
@@ -118,10 +127,12 @@ class RelayServer:
                 try:
                     await self.dispatch(token, message, payload)
                 except (KeyError, TypeError, ValueError) as exc:
+                    self.log.warning("Request rejected: code=%s reason=%s", user["code"], exc)
                     await self.tell(token, {"type": "error", "message": str(exc)})
         except (asyncio.IncompleteReadError, ConnectionError, ssl.SSLError):
             pass
         except Exception as exc:
+            self.log.exception("Unexpected client-session failure")
             try:
                 await send_frame(writer, {"type": "error", "message": str(exc)})
             except Exception:
@@ -133,6 +144,7 @@ class RelayServer:
                 for peer in self.user_connections(token):
                     user = self.state["users"][token]
                     await self.tell(peer, {"type": "presence", "code": user["code"], "name": user["name"], "online": False})
+                self.log.info("Client disconnected: code=%s", self.state["users"][token]["code"])
             writer.close()
             await writer.wait_closed()
 
@@ -151,6 +163,7 @@ class RelayServer:
                 self.state["connections"][token] = mine
                 self.state["connections"][other] = theirs
                 self.save()
+                self.log.info("Connection added: codes=%s,%s", self.state["users"][token]["code"], code)
             await self.tell(token, {"type": "connection_added", "user": self.public_user(other)})
             await self.tell(other, {"type": "connection_added", "user": self.public_user(token)})
         elif kind == "offer":
@@ -184,6 +197,8 @@ class RelayServer:
                 "sha256": str(message.get("sha256", "")), "status": "offered", "received_bytes": 0}
         self.state["transfers"][transfer_id] = item
         self.save()
+        self.log.info("Transfer offered: id=%s sender=%s recipient=%s size=%d", transfer_id[:8],
+                      item["sender_code"], self.state["users"][recipient]["code"], size)
         await self.tell(sender, {"type": "offer_created", "request_id": message.get("request_id"), "transfer_id": transfer_id})
         event = dict(item); event.update(type="incoming_offer", transfer_id=transfer_id)
         await self.tell(recipient, event)
@@ -195,10 +210,12 @@ class RelayServer:
         if decision == "reject":
             self.state["transfers"].pop(transfer_id)
             self.save()
+            self.log.info("Transfer rejected: id=%s", transfer_id[:8])
             await self.tell(item["sender"], {"type": "rejected", "transfer_id": transfer_id, "filename": item["filename"]})
         else:
             item["status"] = "uploading"
             self.save()
+            self.log.info("Transfer accepted: id=%s", transfer_id[:8])
             await self.tell(item["sender"], {"type": "accepted", "transfer_id": transfer_id})
 
     async def chunk(self, sender: str, transfer_id: str, payload: bytes) -> None:
@@ -239,6 +256,7 @@ class RelayServer:
             self.state["transfers"].pop(transfer_id, None); self.save()
             raise ValueError("the uploaded file is not a valid ZIP archive")
         item["status"] = "ready"; self.save()
+        self.log.info("Upload verified and buffered: id=%s size=%d", transfer_id[:8], item["size"])
         event = dict(item); event.update(type="transfer_ready", transfer_id=transfer_id)
         await self.tell(item["recipient"], event)
         await self.tell(sender, {"type": "upload_complete", "transfer_id": transfer_id})
@@ -261,6 +279,7 @@ class RelayServer:
                                     "transfer_id": transfer_id, "filename": item["filename"],
                                     "uploaded": item["size"], "downloaded": downloaded, "size": item["size"]})
         await self.tell(recipient, {"type": "download_complete", "transfer_id": transfer_id, "sha256": item["sha256"]})
+        self.log.info("Buffered download sent: id=%s size=%d", transfer_id[:8], downloaded)
 
     async def received(self, recipient: str, transfer_id: str) -> None:
         item = self.state["transfers"].get(transfer_id)
@@ -270,6 +289,7 @@ class RelayServer:
         self.progress_sent.pop((transfer_id, "upload"), None)
         self.progress_sent.pop((transfer_id, "download"), None)
         self.state["transfers"].pop(transfer_id, None); self.save()
+        self.log.info("Transfer delivered and removed: id=%s", transfer_id[:8])
         await self.tell(item["sender"], {"type": "delivered", "transfer_id": transfer_id})
 
 
@@ -303,6 +323,7 @@ async def run(host: str, port: int, buffer_dir: Path) -> None:
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(cert, key)
     server = await asyncio.start_server(relay.handle, host, port, ssl=context, limit=CHUNK_SIZE + 65536)
+    relay.log.info("TLS relay listening: host=%s port=%d buffer=%s", host, port, relay.root)
     print(f"File Sharing relay listening on {host}:{port} (TLS)")
     async with server:
         await server.serve_forever()

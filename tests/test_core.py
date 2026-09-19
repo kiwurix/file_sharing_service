@@ -6,15 +6,30 @@ import ssl
 import tempfile
 import unittest
 import zipfile
+import logging
 from pathlib import Path
 from unittest import mock
 
 from protocol import read_frame, send_frame
 from server import RelayServer, ensure_certificate
 from client import DEFAULT_PORT, DEFAULT_SERVER, calculate_display_metrics, friendly_error
+from logging_utils import configure_logging
 
 
 class CoreTests(unittest.TestCase):
+    def test_rotating_log_is_timestamped_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "logs" / "test.log"
+            logger = configure_logging("file_sharing.test", path)
+            same_logger = configure_logging("file_sharing.test", path)
+            self.assertIs(logger, same_logger)
+            logger.info("transfer completed")
+            contents = path.read_text("utf-8")
+            self.assertIn("INFO", contents)
+            self.assertIn("transfer completed", contents)
+            self.assertEqual(1, sum(isinstance(handler, logging.handlers.RotatingFileHandler)
+                                    for handler in logger.handlers))
+
     def test_production_server_defaults(self):
         self.assertEqual("localhost", DEFAULT_SERVER)
         self.assertEqual(52007, DEFAULT_PORT)
