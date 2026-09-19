@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import hashlib
 import json
 import os
@@ -27,12 +28,65 @@ except ImportError:
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "file_sharing"
 CONFIG_PATH = APP_DIR / "connections.json"
+DEFAULT_SERVER = "localhost"
+DEFAULT_PORT = 52007
+
+
+def enable_high_dpi() -> None:
+    """Ask Windows for real monitor pixels instead of a bitmap-scaled window."""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except (AttributeError, OSError):
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except (AttributeError, OSError):
+                pass
+
+
+def calculate_display_metrics(screen_width: int, screen_height: int, dpi_scale: float = 1.0) -> dict:
+    """Return physical-pixel geometry that preserves logical object size."""
+    scale = min(3.0, max(1.0, float(dpi_scale)))
+    logical_width, logical_height = screen_width / scale, screen_height / scale
+    width = round(min(1280, max(860, logical_width * 0.72)) * scale)
+    height = round(min(860, max(560, logical_height * 0.78)) * scale)
+    width = min(width, max(round(640 * scale), screen_width - round(40 * scale)))
+    height = min(height, max(round(480 * scale), screen_height - round(40 * scale)))
+    return {"dpi_scale": scale, "width": width, "height": height}
+
+
+def friendly_error(message: str) -> str:
+    """Translate protocol and socket errors into actionable user-facing text."""
+    text = str(message).strip()
+    lowered = text.lower()
+    translations = (
+        (("certificate changed",), "The server's security certificate changed. Verify the server before reconnecting, then reset the saved server address."),
+        (("not connected", "connection refused", "actively refused", "winerror 10061"), "The server cannot be reached right now. Check your internet connection and server settings; the app will keep retrying."),
+        (("getaddrinfo", "name or service not known", "nodename nor servname"), "The server address could not be found. Check the address in Profile & server."),
+        (("timed out", "timeout"), "The server took too long to respond. Check your connection and try again."),
+        (("invalid connection code",), "No user was found with that code. Check the three digits and try again."),
+        (("connection limit reached",), "This connection cannot be added because one of you already has five connections."),
+        (("pair buffer limit",), "This transfer would exceed the 1 GB pending-file limit for this connection."),
+        (("only valid .zip", "not a valid zip"), "Only valid ZIP archives can be sent. Create or choose a ZIP file and try again."),
+        (("transfer is no longer available",), "This transfer is no longer available. Ask the sender to send it again."),
+        (("checksum mismatch", "integrity check"), "The file did not arrive intact. It was removed; please send it again."),
+        (("incomplete upload",), "The upload was interrupted before it finished. Please send the file again."),
+        (("recipient is not a connection",), "That user is no longer in your connections. Add them again using their code."),
+    )
+    for needles, friendly in translations:
+        if any(needle in lowered for needle in needles):
+            return friendly
+    return f"Something went wrong. Please try again.\n\nDetails: {text}" if text else "Something went wrong. Please try again."
 
 
 def load_config() -> dict:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     defaults = {"token": None, "code": "---", "name": "",
-                "server": "localhost", "port": 8765, "server_fingerprint": None, "connections": []}
+                "server": DEFAULT_SERVER, "port": DEFAULT_PORT, "server_fingerprint": None, "connections": []}
     if CONFIG_PATH.exists():
         try:
             defaults.update(json.loads(CONFIG_PATH.read_text("utf-8")))
@@ -146,7 +200,7 @@ class NetworkClient:
             self.events.put({"type": "error", "message": str(exc)})
 
     async def _offer_next(self) -> None:
-        if self.active_transfer or not self.file_queue:
+        if self.active_transfer or not self.file_queue or not self.writer:
             return
         recipient, path = self.file_queue[0]
         request_id = uuid.uuid4().hex
@@ -188,6 +242,7 @@ class NetworkClient:
         if kind == "welcome":
             self.config.update(token=message["token"], code=message["code"], name=message["name"])
             save_config(self.config)
+            await self._offer_next()
         elif kind == "connections":
             self.config["connections"] = message["items"]
             save_config(self.config)
@@ -251,11 +306,17 @@ class App:
     BG, PANEL, CARD, TEXT, MUTED, ACCENT, GREEN, RED = "#10131a", "#171b24", "#202632", "#f4f6fb", "#929bad", "#6c7cff", "#42d392", "#ff647c"
 
     def __init__(self):
+        enable_high_dpi()
         root_class = TkinterDnD.Tk if TkinterDnD else tk.Tk
         self.root = root_class()
         self.root.title("File Sharing")
-        self.root.geometry("940x600")
-        self.root.minsize(780, 520)
+        dpi_scale = self.root.winfo_fpixels("1i") / 96.0
+        metrics = calculate_display_metrics(self.root.winfo_screenwidth(), self.root.winfo_screenheight(), dpi_scale)
+        self.ui_scale = metrics["dpi_scale"]
+        x = max(0, (self.root.winfo_screenwidth() - metrics["width"]) // 2)
+        y = max(0, (self.root.winfo_screenheight() - metrics["height"]) // 2)
+        self.root.geometry(f"{metrics['width']}x{metrics['height']}+{x}+{y}")
+        self.root.minsize(min(self._p(780), metrics["width"]), min(self._p(520), metrics["height"]))
         self.root.configure(bg=self.BG)
         self.config = load_config()
         if not str(self.config.get("name", "")).strip():
@@ -271,18 +332,25 @@ class App:
         self.network = NetworkClient(self.config, self.events)
         self.connection_rows: dict[str, tk.Frame] = {}
         self.selected_code: str | None = None
+        self.is_online = False
         self._build()
         self._render_connections()
         self.network.start()
         self.root.after(80, self._poll)
+
+    def _p(self, value):
+        """Scale logical pixels to the monitor's physical DPI."""
+        if isinstance(value, tuple):
+            return tuple(self._p(part) for part in value)
+        return round(value * self.ui_scale)
 
     def _label(self, parent, text="", size=11, color=None, **kwargs):
         return tk.Label(parent, text=text, font=("Segoe UI", size, kwargs.pop("weight", "normal")),
                         bg=kwargs.pop("bg", parent.cget("bg")), fg=color or self.TEXT, **kwargs)
 
     def _button(self, parent, text, command, color=None, **kwargs):
-        padx = kwargs.pop("padx", 18)
-        pady = kwargs.pop("pady", 9)
+        padx = self._p(kwargs.pop("padx", 18))
+        pady = self._p(kwargs.pop("pady", 9))
         return tk.Button(parent, text=text, command=command, bg=color or self.ACCENT, fg="white", activebackground=color or self.ACCENT,
                          activeforeground="white", relief="flat", bd=0, font=("Segoe UI Semibold", 10), cursor="hand2", padx=padx, pady=pady, **kwargs)
 
@@ -290,76 +358,82 @@ class App:
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure("Upload.Horizontal.TProgressbar", troughcolor="#2a3040", background=self.ACCENT,
-                        bordercolor="#2a3040", lightcolor=self.ACCENT, darkcolor=self.ACCENT)
+                        bordercolor="#2a3040", lightcolor=self.ACCENT, darkcolor=self.ACCENT, thickness=self._p(8))
         style.configure("Download.Horizontal.TProgressbar", troughcolor="#2a3040", background=self.GREEN,
-                        bordercolor="#2a3040", lightcolor=self.GREEN, darkcolor=self.GREEN)
-        sidebar = tk.Frame(self.root, bg=self.PANEL, width=280)
+                        bordercolor="#2a3040", lightcolor=self.GREEN, darkcolor=self.GREEN, thickness=self._p(8))
+        sidebar = tk.Frame(self.root, bg=self.PANEL, width=self._p(280))
         sidebar.pack(side="left", fill="y"); sidebar.pack_propagate(False)
-        self._label(sidebar, "FILE SHARING", 15, weight="bold").pack(anchor="w", padx=24, pady=(24, 2))
+        self._label(sidebar, "FILE SHARING", 15, weight="bold").pack(anchor="w", padx=self._p(24), pady=self._p((24, 2)))
         self.status = self._label(sidebar, "● Connecting…", 9, self.MUTED)
-        self.status.pack(anchor="w", padx=24)
+        self.status.pack(anchor="w", padx=self._p(24))
         code_card = tk.Frame(sidebar, bg=self.CARD)
-        code_card.pack(fill="x", padx=18, pady=22)
-        self._label(code_card, "YOUR CODE", 8, self.MUTED).pack(pady=(14, 0))
+        code_card.pack(fill="x", padx=self._p(18), pady=self._p(22))
+        self._label(code_card, "YOUR CODE", 8, self.MUTED).pack(pady=self._p((14, 0)))
         self.nickname_label = self._label(code_card, self.config["name"], 11, weight="bold")
-        self.nickname_label.pack(pady=(4, 0))
+        self.nickname_label.pack(pady=self._p((4, 0)))
         self.code_label = self._label(code_card, self.config["code"], 28, weight="bold")
-        self.code_label.pack(pady=(0, 12))
-        add = tk.Frame(sidebar, bg=self.PANEL); add.pack(fill="x", padx=18)
+        self.code_label.pack(pady=self._p((0, 12)))
+        add = tk.Frame(sidebar, bg=self.PANEL); add.pack(fill="x", padx=self._p(18))
         self.code_entry = tk.Entry(add, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat", justify="center",
                                    font=("Segoe UI Semibold", 12), width=8)
-        self.code_entry.pack(side="left", fill="x", expand=True, ipady=9)
-        self._button(add, "+", self._add_connection, padx=14).pack(side="left", padx=(8, 0))
-        self._label(sidebar, "CONNECTIONS", 9, self.MUTED, weight="bold").pack(anchor="w", padx=24, pady=(24, 8))
+        self.code_entry.pack(side="left", fill="x", expand=True, ipady=self._p(9))
+        self._button(add, "+", self._add_connection, padx=14).pack(side="left", padx=self._p((8, 0)))
+        self._label(sidebar, "CONNECTIONS", 9, self.MUTED, weight="bold").pack(anchor="w", padx=self._p(24), pady=self._p((24, 8)))
         self.connection_list = tk.Frame(sidebar, bg=self.PANEL)
-        self.connection_list.pack(fill="both", expand=True, padx=12)
-        self._button(sidebar, "Profile & server", self._server_settings, self.CARD).pack(fill="x", padx=18, pady=18)
+        self.connection_list.pack(fill="both", expand=True, padx=self._p(12))
+        self._button(sidebar, "Profile & server", self._server_settings, self.CARD).pack(fill="x", padx=self._p(18), pady=self._p(18))
 
         main = tk.Frame(self.root, bg=self.BG); main.pack(side="left", fill="both", expand=True)
-        top = tk.Frame(main, bg=self.BG); top.pack(fill="x", padx=34, pady=(28, 12))
+        top = tk.Frame(main, bg=self.BG); top.pack(fill="x", padx=self._p(34), pady=self._p((28, 12)))
         self.title = self._label(top, "Choose a connection", 20, weight="bold"); self.title.pack(anchor="w")
-        self.subtitle = self._label(top, "Select someone on the left to send ZIP files.", 10, self.MUTED); self.subtitle.pack(anchor="w", pady=(4, 0))
-        self.drop = tk.Frame(main, bg=self.PANEL, highlightbackground="#343b4a", highlightthickness=1)
-        self.drop.pack(fill="both", expand=True, padx=34, pady=18)
+        self.subtitle = self._label(top, "Select someone on the left to send ZIP files.", 10, self.MUTED); self.subtitle.pack(anchor="w", pady=self._p((4, 0)))
+        self.drop = tk.Frame(main, bg=self.PANEL, highlightbackground="#343b4a", highlightthickness=self._p(1))
+        self.drop.pack(fill="both", expand=True, padx=self._p(34), pady=self._p(18))
         center = tk.Frame(self.drop, bg=self.PANEL); center.place(relx=.5, rely=.47, anchor="center")
         self._label(center, "⇧", 42, self.ACCENT).pack()
-        self._label(center, "Drop ZIP files here", 17, weight="bold").pack(pady=(4, 4))
+        self._label(center, "Drop ZIP files here", 17, weight="bold").pack(pady=self._p((4, 4)))
         self._label(center, "or select several files from Explorer", 10, self.MUTED).pack()
-        self._button(center, "Choose ZIP files", self._choose_files).pack(pady=18)
+        self._button(center, "Choose ZIP files", self._choose_files).pack(pady=self._p(18))
         progress_area = tk.Frame(main, bg=self.BG)
-        progress_area.pack(fill="x", padx=34, pady=(0, 12))
+        progress_area.pack(fill="x", padx=self._p(34), pady=self._p((0, 12)))
         self.progress_widgets = {}
         for column, (direction, heading) in enumerate((("outgoing", "OUTGOING QUEUE"), ("incoming", "INCOMING QUEUE"))):
             card = tk.Frame(progress_area, bg=self.PANEL)
-            card.grid(row=0, column=column, sticky="nsew", padx=(0, 7) if column == 0 else (7, 0))
+            card.grid(row=0, column=column, sticky="nsew", padx=self._p((0, 7) if column == 0 else (7, 0)))
             progress_area.columnconfigure(column, weight=1)
-            title = self._label(card, heading, 9, self.MUTED, weight="bold"); title.pack(anchor="w", padx=14, pady=(10, 3))
-            filename = self._label(card, "No active transfer", 9, self.TEXT); filename.pack(anchor="w", padx=14)
+            title = self._label(card, heading, 9, self.MUTED, weight="bold"); title.pack(anchor="w", padx=self._p(14), pady=self._p((10, 3)))
+            filename = self._label(card, "No active transfer", 9, self.TEXT); filename.pack(anchor="w", padx=self._p(14))
             widgets = {"filename": filename}
             for key, label, style_name in (("uploaded", "Uploaded by sender", "Upload.Horizontal.TProgressbar"),
                                             ("downloaded", "Downloaded by receiver", "Download.Horizontal.TProgressbar")):
-                line = tk.Frame(card, bg=self.PANEL); line.pack(fill="x", padx=14, pady=(6, 0))
+                line = tk.Frame(card, bg=self.PANEL); line.pack(fill="x", padx=self._p(14), pady=self._p((6, 0)))
                 self._label(line, label, 8, self.MUTED).pack(side="left")
                 percent = self._label(line, "0.0%", 8, self.MUTED); percent.pack(side="right")
                 bar = ttk.Progressbar(card, maximum=100, value=0, style=style_name)
-                bar.pack(fill="x", padx=14, pady=(2, 4 if key == "downloaded" else 0))
+                bar.pack(fill="x", padx=self._p(14), pady=self._p((2, 4 if key == "downloaded" else 0)))
                 widgets[key] = bar; widgets[key + "_label"] = percent
             self.progress_widgets[direction] = widgets
         self.activity = self._label(main, "Ready", 9, self.MUTED)
-        self.activity.pack(anchor="w", padx=34, pady=(0, 22))
+        self.activity.pack(anchor="w", padx=self._p(34), pady=self._p((0, 22)))
         if DND_FILES:
             self.drop.drop_target_register(DND_FILES)
             self.drop.dnd_bind("<<Drop>>", lambda event: self._send_paths(list(self.root.tk.splitlist(event.data))))
 
     def _render_connections(self):
         for child in self.connection_list.winfo_children(): child.destroy()
+        if not self.config.get("connections"):
+            self._label(self.connection_list, "No connections yet", 10, self.TEXT).pack(anchor="w", padx=self._p(12), pady=self._p((12, 3)))
+            self._label(self.connection_list, "Enter a 3-digit code above\nto add someone.", 9, self.MUTED,
+                        justify="left").pack(anchor="w", padx=self._p(12))
+            return
         for item in self.config.get("connections", []):
             row = tk.Frame(self.connection_list, bg=self.PANEL, cursor="hand2")
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x", pady=self._p(2))
             dot = "●"; color = self.GREEN if item.get("online") else self.RED
-            self._label(row, dot, 9, color).pack(side="left", padx=(10, 8), pady=10)
+            self._label(row, dot, 9, color).pack(side="left", padx=self._p((10, 8)), pady=self._p(10))
             self._label(row, item.get("name", "User"), 10).pack(side="left")
-            self._label(row, item["code"], 9, self.MUTED).pack(side="right", padx=10)
+            state = "Online" if item.get("online") else "Offline"
+            self._label(row, f"{state}  ·  {item['code']}", 9, self.MUTED).pack(side="right", padx=self._p(10))
             for widget in (row, *row.winfo_children()):
                 widget.bind("<Button-1>", lambda _, code=item["code"], name=item.get("name", "User"): self._select(code, name))
 
@@ -378,19 +452,25 @@ class App:
 
     def _server_settings(self):
         dialog = tk.Toplevel(self.root); dialog.title("Profile & server"); dialog.configure(bg=self.PANEL)
-        dialog.geometry("420x335"); dialog.resizable(False, False); dialog.transient(self.root); dialog.grab_set()
-        self._label(dialog, "Profile & relay server", 17, weight="bold").pack(anchor="w", padx=28, pady=(24, 12))
-        form = tk.Frame(dialog, bg=self.PANEL); form.pack(fill="x", padx=28)
+        dialog.geometry(f"{self._p(420)}x{self._p(390)}"); dialog.resizable(False, False); dialog.transient(self.root); dialog.grab_set()
+        self._label(dialog, "Profile & relay server", 17, weight="bold").pack(anchor="w", padx=self._p(28), pady=self._p((24, 12)))
+        form = tk.Frame(dialog, bg=self.PANEL); form.pack(fill="x", padx=self._p(28))
         self._label(form, "Nickname", 9, self.MUTED).grid(row=0, column=0, columnspan=2, sticky="w")
         nickname = tk.Entry(form, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat", font=("Segoe UI", 10))
-        nickname.grid(row=1, column=0, columnspan=2, sticky="ew", ipady=8); nickname.insert(0, self.config["name"])
-        self._label(form, "Address", 9, self.MUTED).grid(row=2, column=0, sticky="w", pady=(12, 0))
-        self._label(form, "Port", 9, self.MUTED).grid(row=2, column=1, sticky="w", padx=(12, 0), pady=(12, 0))
+        nickname.grid(row=1, column=0, columnspan=2, sticky="ew", ipady=self._p(8)); nickname.insert(0, self.config["name"])
+        self._label(form, "Address", 9, self.MUTED).grid(row=2, column=0, sticky="w", pady=self._p((12, 0)))
+        self._label(form, "Port", 9, self.MUTED).grid(row=2, column=1, sticky="w", padx=self._p((12, 0)), pady=self._p((12, 0)))
         host = tk.Entry(form, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat", font=("Segoe UI", 10))
         port = tk.Entry(form, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat", width=8, font=("Segoe UI", 10))
-        host.grid(row=3, column=0, sticky="ew", ipady=8); port.grid(row=3, column=1, padx=(12, 0), ipady=8)
+        host.grid(row=3, column=0, sticky="ew", ipady=self._p(8)); port.grid(row=3, column=1, padx=self._p((12, 0)), ipady=self._p(8))
         form.columnconfigure(0, weight=1); host.insert(0, self.config["server"]); port.insert(0, str(self.config["port"]))
-        self._label(dialog, "Changing the address resets the saved certificate pin.", 9, self.MUTED).pack(anchor="w", padx=28, pady=12)
+        hint_row = tk.Frame(dialog, bg=self.PANEL); hint_row.pack(fill="x", padx=self._p(28), pady=self._p(12))
+        self._label(hint_row, f"Default: {DEFAULT_SERVER}:{DEFAULT_PORT}", 9, self.MUTED).pack(side="left")
+        def use_default():
+            host.delete(0, "end"); host.insert(0, DEFAULT_SERVER)
+            port.delete(0, "end"); port.insert(0, str(DEFAULT_PORT))
+        self._button(hint_row, "Use default", use_default, self.CARD, padx=10, pady=5).pack(side="right")
+        self._label(dialog, "Changing the address resets the saved certificate pin.", 9, self.MUTED).pack(anchor="w", padx=self._p(28))
         def apply():
             try: new_port = int(port.get())
             except ValueError:
@@ -406,7 +486,7 @@ class App:
             self.config.update(server=new_host, port=new_port, name=new_name[:24]); save_config(self.config)
             self.nickname_label.config(text=self.config["name"])
             self.network.command({"type": "reconnect"}); dialog.destroy()
-        self._button(dialog, "Save and reconnect", apply).pack(anchor="e", padx=28, pady=10)
+        self._button(dialog, "Save and reconnect", apply).pack(anchor="e", padx=self._p(28), pady=self._p((14, 10)))
 
     def _choose_files(self):
         paths = filedialog.askopenfilenames(title="Choose ZIP files", filetypes=[("ZIP archives", "*.zip")])
@@ -416,13 +496,16 @@ class App:
         if not self.selected_code:
             messagebox.showinfo("Choose a connection", "Select a recipient first.")
             return
-        invalid = [p for p in paths if Path(p).suffix.lower() != ".zip"]
         valid = [p for p in paths if Path(p).is_file() and Path(p).suffix.lower() == ".zip" and zipfile.is_zipfile(p)]
+        invalid = [p for p in paths if p not in valid]
         if invalid:
-            messagebox.showwarning("ZIP files only", "Non-ZIP files were skipped.")
+            messagebox.showwarning("Some files were skipped", "Only valid ZIP archives can be sent.")
         if valid:
             self.network.command({"type": "queue_files", "recipient": self.selected_code, "paths": valid})
-            self.activity.config(text=f"Queued {len(valid)} file(s) for sequential sending")
+            if self.is_online:
+                self.activity.config(text=f"Queued {len(valid)} file(s) for sequential sending")
+            else:
+                self.activity.config(text=f"Queued {len(valid)} file(s) — sending will begin when the server reconnects")
 
     def _set_progress(self, event):
         widgets = self.progress_widgets[event.get("direction", "outgoing")]
@@ -435,12 +518,12 @@ class App:
 
     def _incoming(self, item, ready=False):
         dialog = tk.Toplevel(self.root); dialog.title("Incoming file"); dialog.configure(bg=self.PANEL)
-        dialog.geometry("430x235"); dialog.resizable(False, False); dialog.transient(self.root); dialog.grab_set()
-        self._label(dialog, "Incoming ZIP file", 17, weight="bold").pack(pady=(24, 6))
+        dialog.geometry(f"{self._p(430)}x{self._p(235)}"); dialog.resizable(False, False); dialog.transient(self.root); dialog.grab_set()
+        self._label(dialog, "Incoming ZIP file", 17, weight="bold").pack(pady=self._p((24, 6)))
         self._label(dialog, f"{item.get('sender_name', 'User')} wants to send", 10, self.MUTED).pack()
-        self._label(dialog, item["filename"], 12, weight="bold").pack(pady=(8, 2))
+        self._label(dialog, item["filename"], 12, weight="bold").pack(pady=self._p((8, 2)))
         self._label(dialog, f"{item['size'] / 1048576:.1f} MB", 9, self.MUTED).pack()
-        buttons = tk.Frame(dialog, bg=self.PANEL); buttons.pack(pady=20)
+        buttons = tk.Frame(dialog, bg=self.PANEL); buttons.pack(pady=self._p(20))
         def receive():
             folder = filedialog.askdirectory(parent=dialog, title="Choose download folder")
             if folder:
@@ -456,8 +539,8 @@ class App:
                     self.network.command({"type": "accept", "transfer_id": item["transfer_id"], "folder": folder,
                                           "filename": item["filename"], "size": item["size"]})
                 dialog.destroy()
-        self._button(buttons, "Reject", lambda: (self.network.command({"type": "reject", "transfer_id": item["transfer_id"]}), dialog.destroy()), self.RED).pack(side="left", padx=6)
-        self._button(buttons, "Receive", receive, self.GREEN).pack(side="left", padx=6)
+        self._button(buttons, "Reject", lambda: (self.network.command({"type": "reject", "transfer_id": item["transfer_id"]}), dialog.destroy()), self.RED).pack(side="left", padx=self._p(6))
+        self._button(buttons, "Receive", receive, self.GREEN).pack(side="left", padx=self._p(6))
 
     def _poll(self):
         try:
@@ -465,7 +548,13 @@ class App:
                 event = self.events.get_nowait(); kind = event.get("type")
                 if kind == "network":
                     online = event["online"]
-                    self.status.config(text="● Online" if online else "● Reconnecting…", fg=self.GREEN if online else self.RED)
+                    self.is_online = online
+                    self.status.config(text="● Connected" if online else "● Server unavailable", fg=self.GREEN if online else self.RED)
+                    if online:
+                        if not self.network.file_queue:
+                            self.activity.config(text="Ready to send files")
+                    else:
+                        self.activity.config(text="Check your connection or server settings — retrying automatically")
                 elif kind == "welcome":
                     self.code_label.config(text=event["code"])
                 elif kind in {"connections", "connection_added", "presence"}:
@@ -482,7 +571,7 @@ class App:
                 elif kind == "delivered": self.activity.config(text="Delivered successfully")
                 elif kind == "received_file": messagebox.showinfo("Download complete", f"Saved to:\n{event['path']}")
                 elif kind == "rejected": self.activity.config(text=f"{event['filename']} was rejected")
-                elif kind == "error": messagebox.showerror("File Sharing", event.get("message", "Unknown error"))
+                elif kind == "error": messagebox.showerror("Unable to complete that action", friendly_error(event.get("message", "")))
         except queue.Empty:
             pass
         self.code_label.config(text=self.config.get("code", "---"))

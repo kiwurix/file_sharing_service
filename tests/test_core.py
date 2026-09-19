@@ -11,9 +11,29 @@ from unittest import mock
 
 from protocol import read_frame, send_frame
 from server import RelayServer, ensure_certificate
+from client import DEFAULT_PORT, DEFAULT_SERVER, calculate_display_metrics, friendly_error
 
 
 class CoreTests(unittest.TestCase):
+    def test_production_server_defaults(self):
+        self.assertEqual("localhost", DEFAULT_SERVER)
+        self.assertEqual(52007, DEFAULT_PORT)
+
+    def test_technical_errors_are_user_friendly(self):
+        self.assertIn("server cannot be reached", friendly_error("not connected").lower())
+        self.assertIn("no user was found", friendly_error("invalid connection code").lower())
+        self.assertIn("1 gb", friendly_error("pair buffer limit (1 GB) exceeded").lower())
+
+    def test_display_metrics_adapt_and_remain_bounded(self):
+        laptop = calculate_display_metrics(1366, 768, 1.0)
+        full_hd = calculate_display_metrics(1920, 1080, 1.0)
+        ultra_hd = calculate_display_metrics(3840, 2160, 2.0)
+        self.assertLess(laptop["width"], full_hd["width"])
+        self.assertLess(laptop["height"], full_hd["height"])
+        self.assertLessEqual(ultra_hd["width"], 2560)
+        self.assertLessEqual(ultra_hd["height"], 1720)
+        self.assertEqual(2.0, ultra_hd["dpi_scale"])
+
     def test_identity_is_stable_and_codes_are_unique(self):
         with tempfile.TemporaryDirectory() as folder:
             relay = RelayServer(Path(folder))
