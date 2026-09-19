@@ -15,7 +15,7 @@ import zipfile
 from collections import deque
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import filedialog
 from tkinter import ttk
 
 from protocol import CHUNK_SIZE, read_frame, send_frame
@@ -321,7 +321,7 @@ class App:
         self.config = load_config()
         if not str(self.config.get("name", "")).strip():
             self.root.withdraw()
-            nickname = simpledialog.askstring("Welcome", "Choose a nickname:", parent=self.root)
+            nickname = self._prompt_nickname()
             if not nickname or not nickname.strip():
                 self.root.destroy()
                 raise SystemExit("A nickname is required")
@@ -343,6 +343,71 @@ class App:
         if isinstance(value, tuple):
             return tuple(self._p(part) for part in value)
         return round(value * self.ui_scale)
+
+    def _modal(self, title: str, width: int, height: int, parent=None) -> tk.Toplevel:
+        parent = parent or self.root
+        dialog = tk.Toplevel(parent)
+        dialog.title(title)
+        dialog.configure(bg=self.PANEL)
+        dialog.resizable(False, False)
+        if parent is not self.root or self.root.winfo_viewable():
+            dialog.transient(parent)
+        dialog.update_idletasks()
+        pixel_width, pixel_height = self._p(width), self._p(height)
+        if parent is self.root and not self.root.winfo_viewable():
+            x = (self.root.winfo_screenwidth() - pixel_width) // 2
+            y = (self.root.winfo_screenheight() - pixel_height) // 2
+        else:
+            x = parent.winfo_rootx() + max(0, (parent.winfo_width() - pixel_width) // 2)
+            y = parent.winfo_rooty() + max(0, (parent.winfo_height() - pixel_height) // 2)
+        dialog.geometry(f"{pixel_width}x{pixel_height}+{max(0, x)}+{max(0, y)}")
+        dialog.grab_set()
+        dialog.focus_force()
+        return dialog
+
+    def _close_modal(self, dialog: tk.Toplevel, parent=None) -> None:
+        dialog.grab_release()
+        dialog.destroy()
+        if parent and parent.winfo_exists():
+            parent.grab_set()
+
+    def _alert(self, title: str, message: str, *, tone="error", parent=None) -> None:
+        parent = parent or self.root
+        dialog = self._modal(title, 440, 230, parent)
+        accent = self.RED if tone == "error" else self.ACCENT
+        icon = "!" if tone == "error" else "i"
+        body = tk.Frame(dialog, bg=self.PANEL); body.pack(fill="both", expand=True, padx=self._p(28), pady=self._p(24))
+        badge = tk.Label(body, text=icon, font=("Segoe UI Semibold", 16), bg=accent, fg="white",
+                         width=2, height=1)
+        badge.pack(anchor="w")
+        self._label(body, title, 16, weight="bold").pack(anchor="w", pady=self._p((12, 6)))
+        self._label(body, message, 10, self.MUTED, justify="left", wraplength=self._p(380)).pack(anchor="w")
+        close = lambda: self._close_modal(dialog, parent if parent is not self.root else None)
+        self._button(body, "OK", close).pack(anchor="e", pady=self._p((16, 0)))
+        dialog.protocol("WM_DELETE_WINDOW", close)
+
+    def _prompt_nickname(self) -> str | None:
+        dialog = self._modal("Welcome to File Sharing", 460, 285)
+        result = {"value": None}
+        body = tk.Frame(dialog, bg=self.PANEL); body.pack(fill="both", expand=True, padx=self._p(30), pady=self._p(26))
+        self._label(body, "Choose your nickname", 18, weight="bold").pack(anchor="w")
+        self._label(body, "Friends will see this name next to your online status.", 10, self.MUTED,
+                    wraplength=self._p(400), justify="left").pack(anchor="w", pady=self._p((6, 18)))
+        entry = tk.Entry(body, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat",
+                         font=("Segoe UI", 12))
+        entry.pack(fill="x", ipady=self._p(10)); entry.focus_set()
+        guidance = self._label(body, "Enter 1–24 characters", 9, self.MUTED); guidance.pack(anchor="w", pady=self._p((6, 12)))
+        def submit(_event=None):
+            value = entry.get().strip()
+            if not value:
+                guidance.config(text="Please enter a nickname", fg=self.RED); return
+            result["value"] = value[:24]
+            dialog.destroy()
+        self._button(body, "Continue", submit).pack(anchor="e")
+        entry.bind("<Return>", submit)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.wait_window()
+        return result["value"]
 
     def _label(self, parent, text="", size=11, color=None, **kwargs):
         return tk.Label(parent, text=text, font=("Segoe UI", size, kwargs.pop("weight", "normal")),
@@ -445,14 +510,13 @@ class App:
     def _add_connection(self):
         code = self.code_entry.get().strip()
         if len(code) != 3 or not code.isdigit():
-            messagebox.showerror("Invalid code", "Enter a three-digit connection code.")
+            self._alert("Check the connection code", "Enter exactly three digits, for example 042.")
             return
         self.network.command({"type": "add_connection", "code": code})
         self.code_entry.delete(0, "end")
 
     def _server_settings(self):
-        dialog = tk.Toplevel(self.root); dialog.title("Profile & server"); dialog.configure(bg=self.PANEL)
-        dialog.geometry(f"{self._p(420)}x{self._p(390)}"); dialog.resizable(False, False); dialog.transient(self.root); dialog.grab_set()
+        dialog = self._modal("Profile & server", 420, 390)
         self._label(dialog, "Profile & relay server", 17, weight="bold").pack(anchor="w", padx=self._p(28), pady=self._p((24, 12)))
         form = tk.Frame(dialog, bg=self.PANEL); form.pack(fill="x", padx=self._p(28))
         self._label(form, "Nickname", 9, self.MUTED).grid(row=0, column=0, columnspan=2, sticky="w")
@@ -474,13 +538,13 @@ class App:
         def apply():
             try: new_port = int(port.get())
             except ValueError:
-                messagebox.showerror("Invalid port", "Port must be a number.", parent=dialog); return
+                self._alert("Check the server port", "The port must be a number between 1 and 65535.", parent=dialog); return
             new_host = host.get().strip()
             new_name = nickname.get().strip()
             if not new_host or not 1 <= new_port <= 65535:
-                messagebox.showerror("Invalid server", "Enter a valid address and port.", parent=dialog); return
+                self._alert("Check the server details", "Enter a valid address and a port between 1 and 65535.", parent=dialog); return
             if not new_name:
-                messagebox.showerror("Invalid nickname", "Nickname cannot be empty.", parent=dialog); return
+                self._alert("Choose a nickname", "Your nickname cannot be empty.", parent=dialog); return
             if (new_host, new_port) != (self.config["server"], self.config["port"]):
                 self.config["server_fingerprint"] = None
             self.config.update(server=new_host, port=new_port, name=new_name[:24]); save_config(self.config)
@@ -494,12 +558,12 @@ class App:
 
     def _send_paths(self, paths):
         if not self.selected_code:
-            messagebox.showinfo("Choose a connection", "Select a recipient first.")
+            self._alert("Choose a connection", "Select the person who should receive these files first.", tone="info")
             return
         valid = [p for p in paths if Path(p).is_file() and Path(p).suffix.lower() == ".zip" and zipfile.is_zipfile(p)]
         invalid = [p for p in paths if p not in valid]
         if invalid:
-            messagebox.showwarning("Some files were skipped", "Only valid ZIP archives can be sent.")
+            self._alert("Some files were skipped", "Only valid ZIP archives can be sent.", tone="info")
         if valid:
             self.network.command({"type": "queue_files", "recipient": self.selected_code, "paths": valid})
             if self.is_online:
@@ -517,8 +581,7 @@ class App:
             widgets[key + "_label"].config(text=f"{value:.1f}%")
 
     def _incoming(self, item, ready=False):
-        dialog = tk.Toplevel(self.root); dialog.title("Incoming file"); dialog.configure(bg=self.PANEL)
-        dialog.geometry(f"{self._p(430)}x{self._p(235)}"); dialog.resizable(False, False); dialog.transient(self.root); dialog.grab_set()
+        dialog = self._modal("Incoming file", 430, 235)
         self._label(dialog, "Incoming ZIP file", 17, weight="bold").pack(pady=self._p((24, 6)))
         self._label(dialog, f"{item.get('sender_name', 'User')} wants to send", 10, self.MUTED).pack()
         self._label(dialog, item["filename"], 12, weight="bold").pack(pady=self._p((8, 2)))
@@ -569,9 +632,9 @@ class App:
                 elif kind == "sending_status": self.activity.config(text=event["text"])
                 elif kind == "upload_complete": self.activity.config(text="Upload secured in relay buffer")
                 elif kind == "delivered": self.activity.config(text="Delivered successfully")
-                elif kind == "received_file": messagebox.showinfo("Download complete", f"Saved to:\n{event['path']}")
+                elif kind == "received_file": self._alert("Download complete", f"Saved to:\n{event['path']}", tone="info")
                 elif kind == "rejected": self.activity.config(text=f"{event['filename']} was rejected")
-                elif kind == "error": messagebox.showerror("Unable to complete that action", friendly_error(event.get("message", "")))
+                elif kind == "error": self._alert("Unable to complete that action", friendly_error(event.get("message", "")))
         except queue.Empty:
             pass
         self.code_label.config(text=self.config.get("code", "---"))
