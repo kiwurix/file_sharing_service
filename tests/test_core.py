@@ -1,0 +1,169 @@
+import asyncio
+import json
+import hashlib
+import io
+import ssl
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest import mock
+
+from protocol import read_frame, send_frame
+from server import RelayServer, ensure_certificate
+
+
+class CoreTests(unittest.TestCase):
+    def test_identity_is_stable_and_codes_are_unique(self):
+        with tempfile.TemporaryDirectory() as folder:
+            relay = RelayServer(Path(folder))
+            first_token, first = relay.allocate_user(None, "One")
+            second_token, second = relay.allocate_user(None, "Two")
+            same_token, same = relay.allocate_user(first_token, "Renamed")
+            self.assertNotEqual(first["code"], second["code"])
+            self.assertEqual(first_token, same_token)
+            self.assertEqual("Renamed", same["name"])
+
+    def test_identity_code_and_connections_survive_server_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            relay = RelayServer(root)
+            first_token, first = relay.allocate_user(None, "One")
+            second_token, second = relay.allocate_user(None, "Two")
+            relay.state["connections"][first_token].append(second_token)
+            relay.state["connections"][second_token].append(first_token)
+            relay.save()
+
+            restarted = RelayServer(root)
+            same_token, same_user = restarted.allocate_user(first_token, "One")
+            self.assertEqual(first_token, same_token)
+            self.assertEqual(first["code"], same_user["code"])
+            self.assertEqual([second_token], restarted.user_connections(first_token))
+
+    def test_certificate_is_generated_and_reused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cert, key = ensure_certificate(root)
+            original = cert.read_bytes()
+            self.assertTrue(key.exists())
+            self.assertEqual((cert, key), ensure_certificate(root))
+            self.assertEqual(original, cert.read_bytes())
+
+    def test_zip_validation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            archive = Path(folder) / "valid.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("hello.txt", "hello")
+            self.assertTrue(zipfile.is_zipfile(archive))
+
+
+class ProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_network_progress_is_throttled(self):
+        with tempfile.TemporaryDirectory() as folder:
+            relay = RelayServer(Path(folder))
+            relay.state["transfers"]["transfer"] = {
+                "sender": "one", "recipient": "two", "filename": "file.zip", "size": 4,
+                "status": "uploading", "received_bytes": 0, "sha256": "unused"}
+            messages = []
+
+            async def capture(token, message, payload=b""):
+                messages.append((token, message))
+                return True
+
+            relay.tell = capture
+            with mock.patch("server.time.monotonic", side_effect=[10.0, 10.2]):
+                await relay.chunk("one", "transfer", b"a")
+                await relay.chunk("one", "transfer", b"b")
+            self.assertEqual(2, len(messages))  # sender + receiver, only on the first tick
+            self.assertTrue(all(message["type"] == "transfer_progress" for _, message in messages))
+
+    async def test_frame_round_trip(self):
+        received = asyncio.Future()
+
+        async def handler(reader, writer):
+            received.set_result(await read_frame(reader))
+            writer.close()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        await send_frame(writer, {"type": "chunk", "n": 7}, b"payload")
+        message, payload = await asyncio.wait_for(received, 2)
+        self.assertEqual({"type": "chunk", "n": 7}, message)
+        self.assertEqual(b"payload", payload)
+        writer.close(); await writer.wait_closed()
+        server.close(); await server.wait_closed()
+
+    async def test_two_way_relay_transfer_lifecycle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            relay = RelayServer(root)
+            cert, key = ensure_certificate(root)
+            server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_context.load_cert_chain(cert, key)
+            server = await asyncio.start_server(relay.handle, "127.0.0.1", 0, ssl=server_context)
+            port = server.sockets[0].getsockname()[1]
+            client_context = ssl.create_default_context()
+            client_context.check_hostname = False
+            client_context.verify_mode = ssl.CERT_NONE
+
+            async def connect(name):
+                reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=client_context)
+                await send_frame(writer, {"type": "hello", "name": name})
+                welcome, _ = await read_frame(reader)
+                await read_frame(reader)  # initial connection list
+                return reader, writer, welcome
+
+            async def receive_type(reader, expected):
+                while True:
+                    message, payload = await read_frame(reader)
+                    if message["type"] == expected:
+                        return message, payload
+
+            one_r, one_w, one = await connect("One")
+            two_r, two_w, two = await connect("Two")
+            await send_frame(one_w, {"type": "add_connection", "code": two["code"]})
+            await read_frame(one_r); await read_frame(two_r)
+
+            data_stream = io.BytesIO()
+            with zipfile.ZipFile(data_stream, "w") as archive:
+                archive.writestr("payload.txt", "encrypted relay test")
+            data = data_stream.getvalue()
+            digest = hashlib.sha256(data).hexdigest()
+            await send_frame(one_w, {"type": "offer", "request_id": "r1", "recipient": two["code"],
+                                     "filename": "payload.zip", "size": len(data), "sha256": digest})
+            created, _ = await read_frame(one_r)
+            offered, _ = await read_frame(two_r)
+            transfer_id = created["transfer_id"]
+            self.assertEqual(transfer_id, offered["transfer_id"])
+            await send_frame(two_w, {"type": "accept", "transfer_id": transfer_id})
+            accepted, _ = await read_frame(one_r)
+            self.assertEqual("accepted", accepted["type"])
+            await send_frame(one_w, {"type": "chunk", "transfer_id": transfer_id}, data)
+            upload_progress, _ = await receive_type(one_r, "transfer_progress")
+            self.assertEqual(len(data), upload_progress["uploaded"])
+            self.assertEqual(0, upload_progress["downloaded"])
+            await send_frame(one_w, {"type": "finish", "transfer_id": transfer_id})
+            ready, _ = await receive_type(two_r, "transfer_ready")
+            complete, _ = await read_frame(one_r)
+            self.assertEqual("transfer_ready", ready["type"])
+            self.assertEqual("upload_complete", complete["type"])
+            await send_frame(two_w, {"type": "download", "transfer_id": transfer_id})
+            chunk_message, downloaded = await receive_type(two_r, "download_chunk")
+            done, _ = await receive_type(two_r, "download_complete")
+            self.assertEqual("download_chunk", chunk_message["type"])
+            self.assertEqual(data, downloaded)
+            self.assertEqual(digest, done["sha256"])
+            await send_frame(two_w, {"type": "received", "transfer_id": transfer_id})
+            download_progress, _ = await receive_type(one_r, "transfer_progress")
+            self.assertEqual(len(data), download_progress["downloaded"])
+            delivered, _ = await receive_type(one_r, "delivered")
+            self.assertEqual("delivered", delivered["type"])
+            self.assertFalse((root / "files" / f"{transfer_id}.part").exists())
+            one_w.close(); two_w.close()
+            await one_w.wait_closed(); await two_w.wait_closed()
+            server.close(); await server.wait_closed()
+
+
+if __name__ == "__main__":
+    unittest.main()
