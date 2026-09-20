@@ -705,7 +705,7 @@ class App:
             widgets = {"filename": filename}
             line = tk.Frame(card, bg=self.PANEL); line.pack(fill="x", padx=self._p(14), pady=self._p((6, 0)))
             self._label(line, "Transfer progress", 8, self.MUTED).pack(side="left")
-            progress_label = self._label(line, "0.0% · 0 MiB/s", 8, self.MUTED); progress_label.pack(side="right")
+            progress_label = self._label(line, "0.0% · 0.0 Mb/s", 8, self.MUTED); progress_label.pack(side="right")
             bar = ttk.Progressbar(card, maximum=100, value=0,
                                   style="Upload.Horizontal.TProgressbar" if direction == "outgoing"
                                   else "Download.Horizontal.TProgressbar")
@@ -852,7 +852,8 @@ class App:
         value = min(100.0, 100.0 * transferred / size)
         widgets["filename"].config(text=filename)
         widgets["bar"].configure(value=value)
-        widgets["progress_label"].config(text=f"{value:.1f}% · {sample['speed'] / 1048576:.0f} MiB/s")
+        speed_mbps = sample["speed"] * 8 / 1_000_000
+        widgets["progress_label"].config(text=f"{value:.1f}% · {speed_mbps:.1f} Mb/s")
 
     def _incoming(self, item):
         dialog = self._modal("Incoming file", 430, 235)
