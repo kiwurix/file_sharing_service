@@ -12,7 +12,7 @@ Encrypted ZIP-file sharing with a lightweight desktop client and a persistent re
 - TLS-encrypted traffic with certificate pinning
 - SHA-256 integrity verification
 - Single-pass sending: SHA-256 is calculated while bytes are already being streamed
-- Live TCP+TLS streaming with bounded backpressure and no server-side file buffer
+- Separate TCP+TLS control and file-data channels with bounded backpressure and no server-side file buffer
 - Maximum five connections per user
 - Monotonic streamed/delivered progress with network updates throttled to once per second
 - DPI-aware, resolution-adaptive interface from laptop displays through 4K
@@ -70,7 +70,7 @@ The server keeps its persistent runtime data in `buffer/` inside this project. T
 - `server-key.pem`: private TLS key
 - `client_logs/`: rotating diagnostics uploaded by clients, grouped by client code
 
-File payloads are never stored on the relay. After the receiver accepts, each chunk is forwarded immediately over the existing TCP+TLS connections. TCP flow control slows the sender when the receiver is slower, so memory use remains bounded by the networking stack and one protocol chunk.
+File payloads are never stored on the relay. Each client keeps a lightweight control channel for heartbeat, presence, offers, progress, and receipts, plus an independent data channel used only for file chunks. TCP flow control slows the sender when the receiver is slower, while heartbeat latency remains independent from upload congestion inside the application.
 
 Do not delete or replace `state.json`, `server-cert.pem`, or `server-key.pem` during normal updates. Deleting `state.json` resets every user code and connection. Replacing the certificate causes existing clients to reject the server until their saved certificate pin is reset.
 

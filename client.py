@@ -131,6 +131,9 @@ class NetworkClient:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.write_lock: asyncio.Lock | None = None
+        self.data_writer: asyncio.StreamWriter | None = None
+        self.data_write_lock: asyncio.Lock | None = None
+        self.data_reader_task: asyncio.Task | None = None
         self.pending_paths: dict[str, Path] = {}
         self.file_queue: deque[tuple[str, Path]] = deque()
         self.active_transfer: str | None = None
@@ -158,6 +161,45 @@ class NetworkClient:
             raise ConnectionError("not connected")
         async with self.write_lock:
             await send_frame(self.writer, message, payload)
+
+    async def send_data(self, message: dict, payload: bytes = b"") -> None:
+        if not self.data_writer or not self.data_write_lock:
+            raise ConnectionError("data channel is not connected")
+        async with self.data_write_lock:
+            await send_frame(self.data_writer, message, payload)
+
+    async def _connect_data_channel(self) -> None:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(
+            self.config["server"], int(self.config["port"]), ssl=context,
+            server_hostname=self.config["server"], limit=CHUNK_SIZE + 65536), timeout=10)
+        ssl_object = writer.get_extra_info("ssl_object")
+        fingerprint = hashlib.sha256(ssl_object.getpeercert(binary_form=True)).hexdigest()
+        if fingerprint != self.config.get("server_fingerprint"):
+            writer.close()
+            raise ssl.SSLError("server certificate changed; refusing the connection")
+        await send_frame(writer, {"type": "data_hello", "token": self.config.get("token")})
+        message, _ = await asyncio.wait_for(read_frame(reader), timeout=10)
+        if message.get("type") != "data_welcome":
+            writer.close()
+            raise ConnectionError(message.get("message", "data channel was rejected"))
+        self.data_writer = writer
+        self.data_write_lock = asyncio.Lock()
+        self.data_reader_task = asyncio.create_task(self._data_receive_loop(reader))
+
+    async def _data_receive_loop(self, reader: asyncio.StreamReader) -> None:
+        try:
+            while True:
+                message, payload = await read_frame(reader)
+                await self._handle(message, payload)
+        except asyncio.CancelledError:
+            raise
+        except (asyncio.IncompleteReadError, ConnectionError, OSError, ssl.SSLError) as exc:
+            self.log.warning("Data channel unavailable: %s", exc)
+            if self.writer:
+                self.writer.close()
 
     async def _run(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -201,6 +243,17 @@ class NetworkClient:
                 self.log.warning("Relay connection unavailable: %s", exc)
             finally:
                 self.authenticated = False
+                if self.data_reader_task:
+                    self.data_reader_task.cancel()
+                    try:
+                        await self.data_reader_task
+                    except (asyncio.CancelledError, ConnectionError, OSError):
+                        pass
+                self.data_reader_task = None
+                if self.data_writer:
+                    self.data_writer.close()
+                self.data_writer = None
+                self.data_write_lock = None
                 if heartbeat_task:
                     heartbeat_task.cancel()
                     try:
@@ -300,7 +353,9 @@ class NetworkClient:
         await self.send({"type": "offer", "request_id": request_id, "recipient": recipient,
                          "filename": path.name, "size": path.stat().st_size})
         self.log.info("Transfer offered: recipient=%s size=%d", recipient, path.stat().st_size)
-        self.events.put({"type": "sending_status", "text": f"Waiting for {recipient} to accept {path.name}"})
+        recipient_name = next((item.get("name", "User") for item in self.config.get("connections", [])
+                               if item.get("code") == recipient), "User")
+        self.events.put({"type": "sending_status", "text": f"Waiting for {recipient_name} to accept {path.name}"})
 
     async def _advance_queue(self) -> None:
         if self.file_queue:
@@ -315,8 +370,8 @@ class NetworkClient:
             with path.open("rb") as stream:
                 while block := stream.read(CHUNK_SIZE):
                     digest.update(block)
-                    await self.send({"type": "chunk", "transfer_id": transfer_id}, block)
-            await self.send({"type": "finish", "transfer_id": transfer_id, "sha256": digest.hexdigest()})
+                    await self.send_data({"type": "chunk", "transfer_id": transfer_id}, block)
+            await self.send_data({"type": "finish", "transfer_id": transfer_id, "sha256": digest.hexdigest()})
             self.log.info("Stream sent to relay: id=%s size=%d", transfer_id[:8], size)
         except Exception:
             self.log.exception("Upload failed: id=%s", transfer_id[:8])
@@ -333,6 +388,7 @@ class NetworkClient:
             save_config(self.config)
             self.authenticated = True
             self.capabilities = set(message.get("capabilities", []))
+            await self._connect_data_channel()
             self.restored_outgoing = False
             self.restored_incoming = set()
             self.events.put({"type": "network", "online": True, "verified": "heartbeat" in self.capabilities})
@@ -495,6 +551,8 @@ class App:
         self.network = NetworkClient(self.config, self.events, self.log, APP_DIR / "logs")
         self.connection_rows: dict[str, tk.Frame] = {}
         self.selected_code: str | None = None
+        self.selected_name: str | None = None
+        self.progress_samples: dict[str, dict] = {}
         self.is_online = False
         self._build()
         self._render_connections()
@@ -611,12 +669,25 @@ class App:
         self.connection_list.pack(fill="both", expand=True, padx=self._p(12))
         self._button(sidebar, "Profile & server", self._server_settings, self.CARD).pack(fill="x", padx=self._p(18), pady=self._p(18))
 
-        main = tk.Frame(self.root, bg=self.BG); main.pack(side="left", fill="both", expand=True)
+        main_shell = tk.Frame(self.root, bg=self.BG)
+        main_shell.pack(side="left", fill="both", expand=True)
+        canvas = tk.Canvas(main_shell, bg=self.BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_shell, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        main = tk.Frame(canvas, bg=self.BG)
+        main_window = canvas.create_window((0, 0), window=main, anchor="nw")
+        main.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(main_window, width=event.width))
+        canvas.bind_all("<MouseWheel>", lambda event: canvas.yview_scroll(-int(event.delta / 120), "units"))
         top = tk.Frame(main, bg=self.BG); top.pack(fill="x", padx=self._p(34), pady=self._p((28, 12)))
         self.title = self._label(top, "Choose a connection", 20, weight="bold"); self.title.pack(anchor="w")
         self.subtitle = self._label(top, "Select someone on the left to send ZIP files.", 10, self.MUTED); self.subtitle.pack(anchor="w", pady=self._p((4, 0)))
         self.drop = tk.Frame(main, bg=self.PANEL, highlightbackground="#343b4a", highlightthickness=self._p(1))
-        self.drop.pack(fill="both", expand=True, padx=self._p(34), pady=self._p(18))
+        self.drop.pack(fill="x", padx=self._p(34), pady=self._p(18))
+        self.drop.configure(height=self._p(250))
+        self.drop.pack_propagate(False)
         center = tk.Frame(self.drop, bg=self.PANEL); center.place(relx=.5, rely=.47, anchor="center")
         self._label(center, "⇧", 42, self.ACCENT).pack()
         self._label(center, "Drop ZIP files here", 17, weight="bold").pack(pady=self._p((4, 4)))
@@ -625,21 +696,21 @@ class App:
         progress_area = tk.Frame(main, bg=self.BG)
         progress_area.pack(fill="x", padx=self._p(34), pady=self._p((0, 12)))
         self.progress_widgets = {}
-        for column, (direction, heading) in enumerate((("outgoing", "OUTGOING QUEUE"), ("incoming", "INCOMING QUEUE"))):
+        for row, (direction, heading) in enumerate((("outgoing", "OUTGOING QUEUE"), ("incoming", "INCOMING QUEUE"))):
             card = tk.Frame(progress_area, bg=self.PANEL)
-            card.grid(row=0, column=column, sticky="nsew", padx=self._p((0, 7) if column == 0 else (7, 0)))
-            progress_area.columnconfigure(column, weight=1)
+            card.grid(row=row, column=0, sticky="ew", pady=self._p((0, 7) if row == 0 else (7, 0)))
+            progress_area.columnconfigure(0, weight=1)
             title = self._label(card, heading, 9, self.MUTED, weight="bold"); title.pack(anchor="w", padx=self._p(14), pady=self._p((10, 3)))
             filename = self._label(card, "No active transfer", 9, self.TEXT); filename.pack(anchor="w", padx=self._p(14))
             widgets = {"filename": filename}
-            for key, label, style_name in (("uploaded", "Uploaded by sender", "Upload.Horizontal.TProgressbar"),
-                                            ("downloaded", "Downloaded by receiver", "Download.Horizontal.TProgressbar")):
-                line = tk.Frame(card, bg=self.PANEL); line.pack(fill="x", padx=self._p(14), pady=self._p((6, 0)))
-                self._label(line, label, 8, self.MUTED).pack(side="left")
-                percent = self._label(line, "0.0%", 8, self.MUTED); percent.pack(side="right")
-                bar = ttk.Progressbar(card, maximum=100, value=0, style=style_name)
-                bar.pack(fill="x", padx=self._p(14), pady=self._p((2, 4 if key == "downloaded" else 0)))
-                widgets[key] = bar; widgets[key + "_label"] = percent
+            line = tk.Frame(card, bg=self.PANEL); line.pack(fill="x", padx=self._p(14), pady=self._p((6, 0)))
+            self._label(line, "Transfer progress", 8, self.MUTED).pack(side="left")
+            progress_label = self._label(line, "0.0% · 0 MiB/s", 8, self.MUTED); progress_label.pack(side="right")
+            bar = ttk.Progressbar(card, maximum=100, value=0,
+                                  style="Upload.Horizontal.TProgressbar" if direction == "outgoing"
+                                  else "Download.Horizontal.TProgressbar")
+            bar.pack(fill="x", padx=self._p(14), pady=self._p((2, 8)))
+            widgets.update(bar=bar, progress_label=progress_label)
             self.progress_widgets[direction] = widgets
         self.activity = self._label(main, "Ready", 9, self.MUTED)
         self.activity.pack(anchor="w", padx=self._p(34), pady=self._p((0, 22)))
@@ -668,6 +739,7 @@ class App:
 
     def _select(self, code, name):
         self.selected_code = code
+        self.selected_name = name
         self.title.config(text=name)
         self.subtitle.config(text=f"Secure connection • code {code}")
 
@@ -763,13 +835,24 @@ class App:
                 self.activity.config(text=f"Queued {len(valid)} file(s) — sending will begin when the server reconnects")
 
     def _set_progress(self, event):
-        widgets = self.progress_widgets[event.get("direction", "outgoing")]
+        direction = event.get("direction", "outgoing")
+        widgets = self.progress_widgets[direction]
         size = max(1, int(event.get("size", 0)))
-        widgets["filename"].config(text=event.get("filename", "Transfer"))
-        for key in ("uploaded", "downloaded"):
-            value = min(100.0, 100.0 * int(event.get(key, 0)) / size)
-            widgets[key].configure(value=value)
-            widgets[key + "_label"].config(text=f"{value:.1f}%")
+        filename = event.get("filename", "Transfer")
+        transferred = max(int(event.get("uploaded", 0)), int(event.get("downloaded", 0)))
+        now = time.monotonic()
+        sample = self.progress_samples.get(direction)
+        if not sample or sample["filename"] != filename or transferred < sample["bytes"]:
+            sample = {"filename": filename, "bytes": transferred, "time": now, "speed": 0.0}
+        elif transferred > sample["bytes"] and now > sample["time"]:
+            instant = (transferred - sample["bytes"]) / (now - sample["time"])
+            sample["speed"] = instant if not sample["speed"] else sample["speed"] * 0.7 + instant * 0.3
+            sample["bytes"], sample["time"] = transferred, now
+        self.progress_samples[direction] = sample
+        value = min(100.0, 100.0 * transferred / size)
+        widgets["filename"].config(text=filename)
+        widgets["bar"].configure(value=value)
+        widgets["progress_label"].config(text=f"{value:.1f}% · {sample['speed'] / 1048576:.0f} MiB/s")
 
     def _incoming(self, item):
         dialog = self._modal("Incoming file", 430, 235)

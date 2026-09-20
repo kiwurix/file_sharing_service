@@ -32,6 +32,8 @@ class RelayServer:
         self.state = self._load_state()
         self.online: dict[str, asyncio.StreamWriter] = {}
         self.writer_locks: dict[str, asyncio.Lock] = {}
+        self.data_online: dict[str, asyncio.StreamWriter] = {}
+        self.data_writer_locks: dict[str, asyncio.Lock] = {}
         self.progress_sent: dict[tuple[str, str], float] = {}
         self._recover_interrupted_transfers()
         self.log.info("Relay state loaded: users=%d connections=%d pending_transfers=%d",
@@ -101,6 +103,19 @@ class RelayServer:
             writer.close()
             return False
 
+    async def tell_data(self, token: str, message: dict, payload: bytes = b"") -> bool:
+        writer = self.data_online.get(token)
+        if not writer:
+            return False
+        try:
+            lock = self.data_writer_locks.setdefault(token, asyncio.Lock())
+            async with lock:
+                await send_frame(writer, message, payload)
+            return True
+        except (ConnectionError, OSError, ssl.SSLError, asyncio.CancelledError):
+            writer.close()
+            return False
+
     def append_client_logs(self, token: str, source: str, payload: bytes) -> None:
         if not payload:
             return
@@ -137,6 +152,9 @@ class RelayServer:
         token = None
         try:
             hello, _ = await read_frame(reader)
+            if hello.get("type") == "data_hello":
+                await self.handle_data_connection(reader, writer, str(hello.get("token", "")))
+                return
             if hello.get("type") != "hello":
                 raise ValueError("hello required")
             requested_token = hello.get("token")
@@ -150,8 +168,8 @@ class RelayServer:
             self.online[token] = writer
             self.writer_locks[token] = asyncio.Lock()
             await self.tell(token, {"type": "welcome", "token": token, "code": user["code"], "name": user["name"],
-                                    "protocol_version": 3,
-                                    "capabilities": ["heartbeat", "client_logs", "state_sync", "streaming_relay"]})
+                                    "protocol_version": 4,
+                                    "capabilities": ["heartbeat", "client_logs", "state_sync", "split_data_channel"]})
             peer = writer.get_extra_info("peername")
             self.log.info("Client connected: code=%s address=%s", user["code"], peer[0] if peer else "unknown")
             await self.initial_events(token)
@@ -183,6 +201,10 @@ class RelayServer:
         finally:
             if token and self.online.get(token) is writer:
                 await self.cancel_streams(token)
+                data_writer = self.data_online.pop(token, None)
+                self.data_writer_locks.pop(token, None)
+                if data_writer:
+                    data_writer.close()
                 self.online.pop(token, None)
                 self.writer_locks.pop(token, None)
                 for peer in self.user_connections(token):
@@ -194,6 +216,31 @@ class RelayServer:
                 await writer.wait_closed()
             except (ConnectionError, OSError, ssl.SSLError):
                 pass
+
+    async def handle_data_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                                     token: str) -> None:
+        if token not in self.state["users"] or token not in self.online:
+            raise ValueError("authenticated control connection required")
+        previous = self.data_online.get(token)
+        if previous:
+            previous.close()
+        self.data_online[token] = writer
+        self.data_writer_locks[token] = asyncio.Lock()
+        await self.tell_data(token, {"type": "data_welcome"})
+        try:
+            while self.online.get(token):
+                message, payload = await read_frame(reader)
+                kind = message.get("type")
+                if kind == "chunk":
+                    await self.chunk(token, message["transfer_id"], payload)
+                elif kind == "finish":
+                    await self.finish(token, message["transfer_id"], message.get("sha256"))
+                else:
+                    raise ValueError("unknown data message type")
+        finally:
+            if self.data_online.get(token) is writer:
+                self.data_online.pop(token, None)
+                self.data_writer_locks.pop(token, None)
 
     async def cancel_streams(self, token: str) -> None:
         interrupted = [(transfer_id, item) for transfer_id, item in self.state["transfers"].items()
@@ -229,10 +276,6 @@ class RelayServer:
             await self.offer(token, message)
         elif kind in {"accept", "reject"}:
             await self.decision(token, message["transfer_id"], kind)
-        elif kind == "chunk":
-            await self.chunk(token, message["transfer_id"], payload)
-        elif kind == "finish":
-            await self.finish(token, message["transfer_id"], message.get("sha256"))
         elif kind == "received":
             await self.received(token, message["transfer_id"])
         elif kind == "ping":
@@ -284,7 +327,7 @@ class RelayServer:
             self.log.info("Transfer rejected: id=%s", transfer_id[:8])
             await self.tell(item["sender"], {"type": "rejected", "transfer_id": transfer_id, "filename": item["filename"]})
         else:
-            if recipient not in self.online or item["sender"] not in self.online:
+            if recipient not in self.data_online or item["sender"] not in self.data_online:
                 raise ValueError("both clients must be online to start a transfer")
             item["status"] = "streaming"
             self.save()
@@ -297,7 +340,7 @@ class RelayServer:
             raise ValueError("transfer is not accepting data")
         if item["received_bytes"] + len(payload) > item["size"]:
             raise ValueError("received more data than offered")
-        delivered = await self.tell(item["recipient"], {"type": "download_chunk", "transfer_id": transfer_id}, payload)
+        delivered = await self.tell_data(item["recipient"], {"type": "download_chunk", "transfer_id": transfer_id}, payload)
         if not delivered:
             self.state["transfers"].pop(transfer_id, None)
             self.save()
@@ -321,8 +364,8 @@ class RelayServer:
             raise ValueError("invalid file checksum")
         item["sha256"] = digest
         item["status"] = "awaiting_receipt"; self.save()
-        if not await self.tell(item["recipient"], {"type": "download_complete", "transfer_id": transfer_id,
-                                                   "sha256": digest}):
+        if not await self.tell_data(item["recipient"], {"type": "download_complete", "transfer_id": transfer_id,
+                                                        "sha256": digest}):
             self.state["transfers"].pop(transfer_id, None); self.save()
             raise ValueError("receiver disconnected during transfer")
         self.log.info("Stream relayed: id=%s size=%d", transfer_id[:8], item["size"])

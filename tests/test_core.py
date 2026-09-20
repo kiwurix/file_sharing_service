@@ -176,6 +176,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 return True
 
             relay.tell = capture
+            relay.tell_data = capture
             with mock.patch("server.time.monotonic", side_effect=[10.0, 10.2]):
                 await relay.chunk("one", "transfer", b"a")
                 await relay.chunk("one", "transfer", b"b")
@@ -230,6 +231,16 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
 
             one_r, one_w, one = await connect("One")
             two_r, two_w, two = await connect("Two")
+
+            async def connect_data(token):
+                reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=client_context)
+                await send_frame(writer, {"type": "data_hello", "token": token})
+                welcome, _ = await read_frame(reader)
+                self.assertEqual("data_welcome", welcome["type"])
+                return reader, writer
+
+            one_data_r, one_data_w = await connect_data(one["token"])
+            two_data_r, two_data_w = await connect_data(two["token"])
             await send_frame(one_w, {"type": "add_connection", "code": two["code"]})
             await receive_type(one_r, "connection_added"); await receive_type(two_r, "connection_added")
 
@@ -265,15 +276,15 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             await send_frame(two_w, {"type": "accept", "transfer_id": transfer_id})
             accepted, _ = await receive_type(one_r, "accepted")
             self.assertEqual("accepted", accepted["type"])
-            await send_frame(one_w, {"type": "chunk", "transfer_id": transfer_id}, data)
-            chunk_message, downloaded = await receive_type(two_r, "download_chunk")
+            await send_frame(one_data_w, {"type": "chunk", "transfer_id": transfer_id}, data)
+            chunk_message, downloaded = await receive_type(two_data_r, "download_chunk")
             self.assertEqual("download_chunk", chunk_message["type"])
             self.assertEqual(data, downloaded)
             upload_progress, _ = await receive_type(one_r, "transfer_progress")
             self.assertEqual(len(data), upload_progress["uploaded"])
             self.assertEqual(len(data), upload_progress["downloaded"])
-            await send_frame(one_w, {"type": "finish", "transfer_id": transfer_id, "sha256": digest})
-            done, _ = await receive_type(two_r, "download_complete")
+            await send_frame(one_data_w, {"type": "finish", "transfer_id": transfer_id, "sha256": digest})
+            done, _ = await receive_type(two_data_r, "download_complete")
             complete, _ = await receive_type(one_r, "upload_complete")
             self.assertEqual(digest, done["sha256"])
             self.assertEqual("upload_complete", complete["type"])
@@ -281,6 +292,8 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             delivered, _ = await receive_type(one_r, "delivered")
             self.assertEqual("delivered", delivered["type"])
             self.assertFalse((root / "files").exists())
+            one_data_w.close(); two_data_w.close()
+            await one_data_w.wait_closed(); await two_data_w.wait_closed()
             one_w.close(); two_w.close()
             await one_w.wait_closed(); await two_w.wait_closed()
             server.close(); await server.wait_closed()
