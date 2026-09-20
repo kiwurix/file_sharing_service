@@ -9,6 +9,7 @@ Encrypted ZIP-file sharing with a lightweight desktop client and a persistent re
 - Drag-and-drop or Explorer file selection
 - Sequential multi-file sending
 - Simultaneous transfers in both directions
+- English and Russian interface with a saved language preference
 - TLS-encrypted traffic with certificate pinning
 - SHA-256 integrity verification
 - Single-pass sending: SHA-256 is calculated while bytes are already being streamed

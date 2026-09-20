@@ -35,6 +35,132 @@ DEFAULT_SERVER = "localhost"
 DEFAULT_PORT = 52007
 LOG_UPLOAD_CHUNK = 256 * 1024
 
+STRINGS = {
+    "en": {
+        "app_title": "File Sharing", "brand": "FILE SHARING", "ok": "OK",
+        "welcome_title": "Welcome to File Sharing", "choose_nickname": "Choose your nickname",
+        "nickname_help": "Friends will see this name next to your online status.",
+        "nickname_guidance": "Enter 1–24 characters", "nickname_required": "Please enter a nickname",
+        "continue": "Continue", "connecting": "● Connecting…", "connected": "● Connected",
+        "connected_checking": "● Connected · checking…", "connected_latency": "● Connected · {latency} ms",
+        "server_unavailable": "● Server unavailable", "your_code": "YOUR CODE", "connections": "CONNECTIONS",
+        "profile_server": "Profile & server", "choose_connection": "Choose a connection",
+        "select_left": "Select someone on the left to send ZIP files.", "drop_zip": "Drop ZIP files here",
+        "or_explorer": "or select several files from Explorer", "choose_zip_files": "Choose ZIP files",
+        "outgoing_queue": "OUTGOING QUEUE", "incoming_queue": "INCOMING QUEUE",
+        "no_active_transfer": "No active transfer", "transfer_progress": "Transfer progress", "ready": "Ready",
+        "no_connections": "No connections yet", "enter_code": "Enter a 3-digit code above\nto add someone.",
+        "user": "User", "online": "Online", "offline": "Offline", "status_unknown": "Status unknown",
+        "secure_connection": "Secure connection • code {code}",
+        "check_code": "Check the connection code", "check_code_body": "Enter exactly three digits, for example 042.",
+        "profile_title": "Profile & relay server", "nickname": "Nickname", "address": "Address", "port": "Port",
+        "built_in_relay": "Built-in relay", "use_default": "Use default",
+        "certificate_hint": "Changing the address resets the saved certificate pin.", "language": "Language",
+        "save_changes": "Save changes", "check_port": "Check the server port",
+        "check_port_body": "The port must be a number between 1 and 65535.",
+        "check_server": "Check the server details",
+        "check_server_body": "Enter a valid address and a port between 1 and 65535.",
+        "empty_nickname": "Choose a nickname", "empty_nickname_body": "Your nickname cannot be empty.",
+        "zip_archives": "ZIP archives", "select_recipient": "Select the person who should receive these files first.",
+        "files_skipped": "Some files were skipped", "valid_zip_only": "Only valid ZIP archives can be sent.",
+        "queued_files": "Queued {count} file(s) for sequential sending",
+        "queued_files_offline": "Queued {count} file(s) — sending will begin when the server reconnects",
+        "incoming_file": "Incoming file", "incoming_zip": "Incoming ZIP file", "size_mb": "{size:.1f} MB",
+        "wants_to_send": "{sender} wants to send", "choose_download_folder": "Choose download folder",
+        "reject": "Reject", "receive": "Receive", "ready_to_send": "Ready to send files",
+        "identity_elsewhere": "This identity is open elsewhere — close the other copy to reconnect",
+        "retrying": "Server unavailable — retrying automatically in {seconds} seconds",
+        "file_streamed": "File streamed to receiver", "delivered": "Delivered successfully",
+        "download_complete": "Download complete", "saved_to": "Saved to:\n{path}",
+        "file_rejected": "{filename} was rejected", "unable_action": "Unable to complete that action",
+        "connection_changed": "Connection changed — queued files will retry automatically",
+        "waiting_accept": "Waiting for {recipient} to accept {filename}",
+        "upload_interrupted": "Upload interrupted — it will retry after reconnecting",
+        "waiting_receiver": "Waiting for the receiver to accept the queued file",
+        "transfer_retry": "Transfer interrupted — reconnecting to retry",
+        "transfer_waiting_sender": "Transfer interrupted — waiting for the sender to reconnect",
+        "error_certificate": "The server's security certificate changed. Verify the server before reconnecting, then reset the saved server address.",
+        "error_unreachable": "The server cannot be reached right now. Check your internet connection and server settings; the app will keep retrying.",
+        "error_address": "The server address could not be found. Check the address in Profile & server.",
+        "error_timeout": "The server took too long to respond. Check your connection and try again.",
+        "error_code": "No user was found with that code. Check the three digits and try again.",
+        "error_limit": "This connection cannot be added because one of you already has five connections.",
+        "error_disconnected": "The other user disconnected. The transfer will restart when both of you are online.",
+        "error_zip": "Only valid ZIP archives can be sent. Create or choose a ZIP file and try again.",
+        "error_transfer_missing": "This transfer is no longer available. Ask the sender to send it again.",
+        "error_integrity": "The file did not arrive intact. It was removed; please send it again.",
+        "error_upload": "The upload was interrupted before it finished. Please send the file again.",
+        "error_connection_missing": "That user is no longer in your connections. Add them again using their code.",
+        "error_duplicate": "This identity is already open on another computer. Close the other copy, then this app will reconnect automatically.",
+        "error_generic": "Something went wrong. Please try again.",
+        "error_generic_details": "Something went wrong. Please try again.\n\nDetails: {details}",
+    },
+    "ru": {
+        "app_title": "Обмен файлами", "brand": "ОБМЕН ФАЙЛАМИ", "ok": "ОК",
+        "welcome_title": "Добро пожаловать", "choose_nickname": "Выберите имя",
+        "nickname_help": "Друзья увидят это имя рядом с вашим статусом.",
+        "nickname_guidance": "Введите от 1 до 24 символов", "nickname_required": "Введите имя",
+        "continue": "Продолжить", "connecting": "● Подключение…", "connected": "● Подключено",
+        "connected_checking": "● Подключено · проверка…", "connected_latency": "● Подключено · {latency} мс",
+        "server_unavailable": "● Сервер недоступен", "your_code": "ВАШ КОД", "connections": "КОНТАКТЫ",
+        "profile_server": "Профиль и сервер", "choose_connection": "Выберите контакт",
+        "select_left": "Выберите слева человека, которому хотите отправить ZIP-файлы.",
+        "drop_zip": "Перетащите ZIP-файлы сюда", "or_explorer": "или выберите несколько файлов в Проводнике",
+        "choose_zip_files": "Выбрать ZIP-файлы", "outgoing_queue": "ИСХОДЯЩИЕ",
+        "incoming_queue": "ВХОДЯЩИЕ", "no_active_transfer": "Нет активной передачи",
+        "transfer_progress": "Ход передачи", "ready": "Готово", "no_connections": "Контактов пока нет",
+        "enter_code": "Введите трёхзначный код выше,\nчтобы добавить человека.", "user": "Пользователь",
+        "online": "В сети", "offline": "Не в сети", "status_unknown": "Статус неизвестен",
+        "secure_connection": "Защищённое соединение • код {code}",
+        "check_code": "Проверьте код подключения", "check_code_body": "Введите ровно три цифры, например 042.",
+        "profile_title": "Профиль и сервер", "nickname": "Имя", "address": "Адрес", "port": "Порт",
+        "built_in_relay": "Встроенный сервер", "use_default": "По умолчанию",
+        "certificate_hint": "При смене адреса сохранённая привязка сертификата сбрасывается.", "language": "Язык",
+        "save_changes": "Сохранить изменения", "check_port": "Проверьте порт сервера",
+        "check_port_body": "Порт должен быть числом от 1 до 65535.", "check_server": "Проверьте данные сервера",
+        "check_server_body": "Введите корректный адрес и порт от 1 до 65535.",
+        "empty_nickname": "Выберите имя", "empty_nickname_body": "Имя не может быть пустым.",
+        "zip_archives": "ZIP-архивы", "select_recipient": "Сначала выберите получателя слева.",
+        "files_skipped": "Некоторые файлы пропущены", "valid_zip_only": "Можно отправлять только корректные ZIP-архивы.",
+        "queued_files": "Файлов добавлено в очередь: {count}",
+        "queued_files_offline": "Файлов добавлено в очередь: {count} — отправка начнётся после подключения",
+        "incoming_file": "Входящий файл", "incoming_zip": "Входящий ZIP-файл", "size_mb": "{size:.1f} МБ",
+        "wants_to_send": "{sender} хочет отправить файл", "choose_download_folder": "Выберите папку для загрузки",
+        "reject": "Отклонить", "receive": "Получить", "ready_to_send": "Готово к отправке файлов",
+        "identity_elsewhere": "Этот профиль открыт на другом компьютере — закройте вторую копию",
+        "retrying": "Сервер недоступен — повторное подключение через {seconds} сек.",
+        "file_streamed": "Файл передан получателю", "delivered": "Успешно доставлено",
+        "download_complete": "Загрузка завершена", "saved_to": "Сохранено в:\n{path}",
+        "file_rejected": "Файл {filename} отклонён", "unable_action": "Не удалось выполнить действие",
+        "connection_changed": "Соединение изменилось — файлы из очереди будут отправлены повторно",
+        "waiting_accept": "Ожидание подтверждения от {recipient}: {filename}",
+        "upload_interrupted": "Отправка прервана — она повторится после подключения",
+        "waiting_receiver": "Ожидание подтверждения получателя",
+        "transfer_retry": "Передача прервана — переподключение для повторной попытки",
+        "transfer_waiting_sender": "Передача прервана — ожидание подключения отправителя",
+        "error_certificate": "Сертификат безопасности сервера изменился. Проверьте сервер и сбросьте сохранённый адрес перед подключением.",
+        "error_unreachable": "Сервер сейчас недоступен. Проверьте интернет и настройки; приложение продолжит попытки подключения.",
+        "error_address": "Адрес сервера не найден. Проверьте его в разделе «Профиль и сервер».",
+        "error_timeout": "Сервер слишком долго не отвечает. Проверьте соединение и повторите попытку.",
+        "error_code": "Пользователь с таким кодом не найден. Проверьте три цифры и повторите попытку.",
+        "error_limit": "Нельзя добавить контакт: у одного из пользователей уже пять контактов.",
+        "error_disconnected": "Другой пользователь отключился. Передача возобновится, когда оба будут в сети.",
+        "error_zip": "Можно отправлять только корректные ZIP-архивы. Создайте или выберите ZIP-файл.",
+        "error_transfer_missing": "Эта передача больше недоступна. Попросите отправить файл заново.",
+        "error_integrity": "Файл получен с ошибкой и удалён. Отправьте его заново.",
+        "error_upload": "Отправка прервалась до завершения. Отправьте файл заново.",
+        "error_connection_missing": "Этого пользователя больше нет в контактах. Добавьте его снова по коду.",
+        "error_duplicate": "Этот профиль уже открыт на другом компьютере. Закройте вторую копию; приложение подключится автоматически.",
+        "error_generic": "Произошла ошибка. Повторите попытку.",
+        "error_generic_details": "Произошла ошибка. Повторите попытку.\n\nПодробности: {details}",
+    },
+}
+
+
+def translate(language: str, key: str, **values) -> str:
+    template = STRINGS.get(language, STRINGS["en"]).get(key, STRINGS["en"].get(key, key))
+    return template.format(**values)
+
 
 def enable_high_dpi() -> None:
     """Ask Windows for real monitor pixels instead of a bitmap-scaled window."""
@@ -63,34 +189,34 @@ def calculate_display_metrics(screen_width: int, screen_height: int, dpi_scale: 
     return {"dpi_scale": scale, "width": width, "height": height}
 
 
-def friendly_error(message: str) -> str:
+def friendly_error(message: str, language: str = "en") -> str:
     """Translate protocol and socket errors into actionable user-facing text."""
     text = str(message).strip()
     lowered = text.lower()
     translations = (
-        (("certificate changed",), "The server's security certificate changed. Verify the server before reconnecting, then reset the saved server address."),
-        (("not connected", "connection refused", "actively refused", "winerror 10061"), "The server cannot be reached right now. Check your internet connection and server settings; the app will keep retrying."),
-        (("getaddrinfo", "name or service not known", "nodename nor servname"), "The server address could not be found. Check the address in Profile & server."),
-        (("timed out", "timeout"), "The server took too long to respond. Check your connection and try again."),
-        (("invalid connection code",), "No user was found with that code. Check the three digits and try again."),
-        (("connection limit reached",), "This connection cannot be added because one of you already has five connections."),
-        (("receiver disconnected", "both clients must be online"), "The other user disconnected. The transfer will restart when both of you are online."),
-        (("only valid .zip", "not a valid zip"), "Only valid ZIP archives can be sent. Create or choose a ZIP file and try again."),
-        (("transfer is no longer available",), "This transfer is no longer available. Ask the sender to send it again."),
-        (("checksum mismatch", "integrity check"), "The file did not arrive intact. It was removed; please send it again."),
-        (("incomplete upload",), "The upload was interrupted before it finished. Please send the file again."),
-        (("recipient is not a connection",), "That user is no longer in your connections. Add them again using their code."),
-        (("duplicate session", "already connected"), "This identity is already open on another computer. Close the other copy, then this app will reconnect automatically."),
+        (("certificate changed",), "error_certificate"),
+        (("not connected", "connection refused", "actively refused", "winerror 10061"), "error_unreachable"),
+        (("getaddrinfo", "name or service not known", "nodename nor servname"), "error_address"),
+        (("timed out", "timeout"), "error_timeout"),
+        (("invalid connection code",), "error_code"),
+        (("connection limit reached",), "error_limit"),
+        (("receiver disconnected", "both clients must be online"), "error_disconnected"),
+        (("only valid .zip", "not a valid zip"), "error_zip"),
+        (("transfer is no longer available",), "error_transfer_missing"),
+        (("checksum mismatch", "integrity check"), "error_integrity"),
+        (("incomplete upload",), "error_upload"),
+        (("recipient is not a connection",), "error_connection_missing"),
+        (("duplicate session", "already connected"), "error_duplicate"),
     )
-    for needles, friendly in translations:
+    for needles, key in translations:
         if any(needle in lowered for needle in needles):
-            return friendly
-    return f"Something went wrong. Please try again.\n\nDetails: {text}" if text else "Something went wrong. Please try again."
+            return translate(language, key)
+    return translate(language, "error_generic_details", details=text) if text else translate(language, "error_generic")
 
 
 def load_config() -> dict:
     APP_DIR.mkdir(parents=True, exist_ok=True)
-    defaults = {"token": None, "code": "---", "name": "",
+    defaults = {"token": None, "code": "---", "name": "", "language": "en",
                 "server": DEFAULT_SERVER, "port": DEFAULT_PORT, "use_default_server": True,
                 "server_fingerprint": None, "connections": []}
     if CONFIG_PATH.exists():
@@ -103,6 +229,8 @@ def load_config() -> dict:
                 ) == (DEFAULT_SERVER, DEFAULT_PORT)
         except (OSError, ValueError):
             pass
+    if defaults.get("language") not in STRINGS:
+        defaults["language"] = "en"
     return defaults
 
 
@@ -333,7 +461,7 @@ class NetworkClient:
             if kind == "queue_files":
                 self.pending_paths.clear()
                 self.active_transfer = None
-                self.events.put({"type": "sending_status", "text": "Connection changed — queued files will retry automatically"})
+                self.events.put({"type": "sending_status", "key": "connection_changed"})
                 if self.writer:
                     self.writer.close()
                 return
@@ -353,9 +481,11 @@ class NetworkClient:
         await self.send({"type": "offer", "request_id": request_id, "recipient": recipient,
                          "filename": path.name, "size": path.stat().st_size})
         self.log.info("Transfer offered: recipient=%s size=%d", recipient, path.stat().st_size)
-        recipient_name = next((item.get("name", "User") for item in self.config.get("connections", [])
-                               if item.get("code") == recipient), "User")
-        self.events.put({"type": "sending_status", "text": f"Waiting for {recipient_name} to accept {path.name}"})
+        default_user = translate(self.config.get("language", "en"), "user")
+        recipient_name = next((item.get("name", default_user) for item in self.config.get("connections", [])
+                               if item.get("code") == recipient), default_user)
+        self.events.put({"type": "sending_status", "key": "waiting_accept",
+                         "values": {"recipient": recipient_name, "filename": path.name}})
 
     async def _advance_queue(self) -> None:
         if self.file_queue:
@@ -377,7 +507,7 @@ class NetworkClient:
             self.log.exception("Upload failed: id=%s", transfer_id[:8])
             self.pending_paths.pop(transfer_id, None)
             self.active_transfer = None
-            self.events.put({"type": "sending_status", "text": "Upload interrupted — it will retry after reconnecting"})
+            self.events.put({"type": "sending_status", "key": "upload_interrupted"})
             if self.writer:
                 self.writer.close()
 
@@ -429,7 +559,7 @@ class NetworkClient:
             if self.file_queue:
                 self.pending_paths.clear()
                 self.pending_paths[message["transfer_id"]] = self.file_queue[0][1]
-                self.events.put({"type": "sending_status", "text": "Waiting for the receiver to accept the queued file"})
+                self.events.put({"type": "sending_status", "key": "waiting_receiver"})
             else:
                 await self.send({"type": "cancel", "transfer_id": message["transfer_id"]})
                 self.active_transfer = None
@@ -483,12 +613,12 @@ class NetworkClient:
             if message["transfer_id"] in self.pending_paths:
                 self.pending_paths.pop(message["transfer_id"], None)
                 self.active_transfer = None
-                self.events.put({"type": "sending_status", "text": "Transfer interrupted — reconnecting to retry"})
+                self.events.put({"type": "sending_status", "key": "transfer_retry"})
                 if self.writer:
                     self.writer.close()
                 return
             self._discard_download(message["transfer_id"])
-            self.events.put({"type": "sending_status", "text": "Transfer interrupted — waiting for the sender to reconnect"})
+            self.events.put({"type": "sending_status", "key": "transfer_waiting_sender"})
             return
         elif kind == "error" and message.get("code") == "duplicate_session":
             self.duplicate_session = True
@@ -526,7 +656,9 @@ class App:
         enable_high_dpi()
         root_class = TkinterDnD.Tk if TkinterDnD else tk.Tk
         self.root = root_class()
-        self.root.title("File Sharing")
+        self.config = load_config()
+        self.language = self.config.get("language", "en")
+        self.root.title(self._t("app_title"))
         dpi_scale = self.root.winfo_fpixels("1i") / 96.0
         metrics = calculate_display_metrics(self.root.winfo_screenwidth(), self.root.winfo_screenheight(), dpi_scale)
         self.ui_scale = metrics["dpi_scale"]
@@ -535,7 +667,6 @@ class App:
         self.root.geometry(f"{metrics['width']}x{metrics['height']}+{x}+{y}")
         self.root.minsize(min(self._p(780), metrics["width"]), min(self._p(520), metrics["height"]))
         self.root.configure(bg=self.BG)
-        self.config = load_config()
         self.log = configure_logging("file_sharing.client", APP_DIR / "logs" / "client.log")
         self.log.info("Client starting: server=%s port=%s", self.config["server"], self.config["port"])
         if not str(self.config.get("name", "")).strip():
@@ -554,6 +685,7 @@ class App:
         self.selected_name: str | None = None
         self.progress_samples: dict[str, dict] = {}
         self.is_online = False
+        self.last_latency_ms: int | None = None
         self._build()
         self._render_connections()
         self.network.start()
@@ -564,6 +696,9 @@ class App:
         if isinstance(value, tuple):
             return tuple(self._p(part) for part in value)
         return round(value * self.ui_scale)
+
+    def _t(self, key: str, **values) -> str:
+        return translate(self.language, key, **values)
 
     def _modal(self, title: str, width: int, height: int, parent=None) -> tk.Toplevel:
         parent = parent or self.root
@@ -604,27 +739,27 @@ class App:
         self._label(body, title, 16, weight="bold").pack(anchor="w", pady=self._p((12, 6)))
         self._label(body, message, 10, self.MUTED, justify="left", wraplength=self._p(380)).pack(anchor="w")
         close = lambda: self._close_modal(dialog, parent if parent is not self.root else None)
-        self._button(body, "OK", close).pack(anchor="e", pady=self._p((16, 0)))
+        self._button(body, self._t("ok"), close).pack(anchor="e", pady=self._p((16, 0)))
         dialog.protocol("WM_DELETE_WINDOW", close)
 
     def _prompt_nickname(self) -> str | None:
-        dialog = self._modal("Welcome to File Sharing", 460, 285)
+        dialog = self._modal(self._t("welcome_title"), 460, 285)
         result = {"value": None}
         body = tk.Frame(dialog, bg=self.PANEL); body.pack(fill="both", expand=True, padx=self._p(30), pady=self._p(26))
-        self._label(body, "Choose your nickname", 18, weight="bold").pack(anchor="w")
-        self._label(body, "Friends will see this name next to your online status.", 10, self.MUTED,
+        self._label(body, self._t("choose_nickname"), 18, weight="bold").pack(anchor="w")
+        self._label(body, self._t("nickname_help"), 10, self.MUTED,
                     wraplength=self._p(400), justify="left").pack(anchor="w", pady=self._p((6, 18)))
         entry = tk.Entry(body, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat",
                          font=("Segoe UI", 12))
         entry.pack(fill="x", ipady=self._p(10)); entry.focus_set()
-        guidance = self._label(body, "Enter 1–24 characters", 9, self.MUTED); guidance.pack(anchor="w", pady=self._p((6, 12)))
+        guidance = self._label(body, self._t("nickname_guidance"), 9, self.MUTED); guidance.pack(anchor="w", pady=self._p((6, 12)))
         def submit(_event=None):
             value = entry.get().strip()
             if not value:
-                guidance.config(text="Please enter a nickname", fg=self.RED); return
+                guidance.config(text=self._t("nickname_required"), fg=self.RED); return
             result["value"] = value[:24]
             dialog.destroy()
-        self._button(body, "Continue", submit).pack(anchor="e")
+        self._button(body, self._t("continue"), submit).pack(anchor="e")
         entry.bind("<Return>", submit)
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         dialog.wait_window()
@@ -640,6 +775,25 @@ class App:
         return tk.Button(parent, text=text, command=command, bg=color or self.ACCENT, fg="white", activebackground=color or self.ACCENT,
                          activeforeground="white", relief="flat", bd=0, font=("Segoe UI Semibold", 10), cursor="hand2", padx=padx, pady=pady, **kwargs)
 
+    def _rebuild_interface(self) -> None:
+        for child in self.root.winfo_children():
+            child.destroy()
+        self.root.title(self._t("app_title"))
+        self._build()
+        self._render_connections()
+        if self.selected_code and self.selected_name:
+            self.title.config(text=self.selected_name)
+            self.subtitle.config(text=self._t("secure_connection", code=self.selected_code))
+        if self.is_online:
+            if self.last_latency_ms is None:
+                self.status.config(text=self._t("connected"), fg=self.GREEN)
+            else:
+                self.status.config(text=self._t("connected_latency", latency=self.last_latency_ms), fg=self.GREEN)
+            if not self.network.file_queue:
+                self.activity.config(text=self._t("ready_to_send"))
+        else:
+            self.status.config(text=self._t("server_unavailable"), fg=self.RED)
+
     def _build(self):
         style = ttk.Style(self.root)
         style.theme_use("clam")
@@ -649,12 +803,12 @@ class App:
                         bordercolor="#2a3040", lightcolor=self.GREEN, darkcolor=self.GREEN, thickness=self._p(8))
         sidebar = tk.Frame(self.root, bg=self.PANEL, width=self._p(280))
         sidebar.pack(side="left", fill="y"); sidebar.pack_propagate(False)
-        self._label(sidebar, "FILE SHARING", 15, weight="bold").pack(anchor="w", padx=self._p(24), pady=self._p((24, 2)))
-        self.status = self._label(sidebar, "● Connecting…", 9, self.MUTED)
+        self._label(sidebar, self._t("brand"), 15, weight="bold").pack(anchor="w", padx=self._p(24), pady=self._p((24, 2)))
+        self.status = self._label(sidebar, self._t("connecting"), 9, self.MUTED)
         self.status.pack(anchor="w", padx=self._p(24))
         code_card = tk.Frame(sidebar, bg=self.CARD)
         code_card.pack(fill="x", padx=self._p(18), pady=self._p(22))
-        self._label(code_card, "YOUR CODE", 8, self.MUTED).pack(pady=self._p((14, 0)))
+        self._label(code_card, self._t("your_code"), 8, self.MUTED).pack(pady=self._p((14, 0)))
         self.nickname_label = self._label(code_card, self.config["name"], 11, weight="bold")
         self.nickname_label.pack(pady=self._p((4, 0)))
         self.code_label = self._label(code_card, self.config["code"], 28, weight="bold")
@@ -664,10 +818,10 @@ class App:
                                    font=("Segoe UI Semibold", 12), width=8)
         self.code_entry.pack(side="left", fill="x", expand=True, ipady=self._p(9))
         self._button(add, "+", self._add_connection, padx=14).pack(side="left", padx=self._p((8, 0)))
-        self._label(sidebar, "CONNECTIONS", 9, self.MUTED, weight="bold").pack(anchor="w", padx=self._p(24), pady=self._p((24, 8)))
+        self._label(sidebar, self._t("connections"), 9, self.MUTED, weight="bold").pack(anchor="w", padx=self._p(24), pady=self._p((24, 8)))
         self.connection_list = tk.Frame(sidebar, bg=self.PANEL)
         self.connection_list.pack(fill="both", expand=True, padx=self._p(12))
-        self._button(sidebar, "Profile & server", self._server_settings, self.CARD).pack(fill="x", padx=self._p(18), pady=self._p(18))
+        self._button(sidebar, self._t("profile_server"), self._server_settings, self.CARD).pack(fill="x", padx=self._p(18), pady=self._p(18))
 
         main_shell = tk.Frame(self.root, bg=self.BG)
         main_shell.pack(side="left", fill="both", expand=True)
@@ -682,29 +836,30 @@ class App:
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(main_window, width=event.width))
         canvas.bind_all("<MouseWheel>", lambda event: canvas.yview_scroll(-int(event.delta / 120), "units"))
         top = tk.Frame(main, bg=self.BG); top.pack(fill="x", padx=self._p(34), pady=self._p((28, 12)))
-        self.title = self._label(top, "Choose a connection", 20, weight="bold"); self.title.pack(anchor="w")
-        self.subtitle = self._label(top, "Select someone on the left to send ZIP files.", 10, self.MUTED); self.subtitle.pack(anchor="w", pady=self._p((4, 0)))
+        self.title = self._label(top, self._t("choose_connection"), 20, weight="bold"); self.title.pack(anchor="w")
+        self.subtitle = self._label(top, self._t("select_left"), 10, self.MUTED); self.subtitle.pack(anchor="w", pady=self._p((4, 0)))
         self.drop = tk.Frame(main, bg=self.PANEL, highlightbackground="#343b4a", highlightthickness=self._p(1))
         self.drop.pack(fill="x", padx=self._p(34), pady=self._p(18))
         self.drop.configure(height=self._p(250))
         self.drop.pack_propagate(False)
         center = tk.Frame(self.drop, bg=self.PANEL); center.place(relx=.5, rely=.47, anchor="center")
         self._label(center, "⇧", 42, self.ACCENT).pack()
-        self._label(center, "Drop ZIP files here", 17, weight="bold").pack(pady=self._p((4, 4)))
-        self._label(center, "or select several files from Explorer", 10, self.MUTED).pack()
-        self._button(center, "Choose ZIP files", self._choose_files).pack(pady=self._p(18))
+        self._label(center, self._t("drop_zip"), 17, weight="bold").pack(pady=self._p((4, 4)))
+        self._label(center, self._t("or_explorer"), 10, self.MUTED).pack()
+        self._button(center, self._t("choose_zip_files"), self._choose_files).pack(pady=self._p(18))
         progress_area = tk.Frame(main, bg=self.BG)
         progress_area.pack(fill="x", padx=self._p(34), pady=self._p((0, 12)))
         self.progress_widgets = {}
-        for row, (direction, heading) in enumerate((("outgoing", "OUTGOING QUEUE"), ("incoming", "INCOMING QUEUE"))):
+        for row, (direction, heading) in enumerate((("outgoing", self._t("outgoing_queue")),
+                                                    ("incoming", self._t("incoming_queue")))):
             card = tk.Frame(progress_area, bg=self.PANEL)
             card.grid(row=row, column=0, sticky="ew", pady=self._p((0, 7) if row == 0 else (7, 0)))
             progress_area.columnconfigure(0, weight=1)
             title = self._label(card, heading, 9, self.MUTED, weight="bold"); title.pack(anchor="w", padx=self._p(14), pady=self._p((10, 3)))
-            filename = self._label(card, "No active transfer", 9, self.TEXT); filename.pack(anchor="w", padx=self._p(14))
+            filename = self._label(card, self._t("no_active_transfer"), 9, self.TEXT); filename.pack(anchor="w", padx=self._p(14))
             widgets = {"filename": filename}
             line = tk.Frame(card, bg=self.PANEL); line.pack(fill="x", padx=self._p(14), pady=self._p((6, 0)))
-            self._label(line, "Transfer progress", 8, self.MUTED).pack(side="left")
+            self._label(line, self._t("transfer_progress"), 8, self.MUTED).pack(side="left")
             progress_label = self._label(line, "0.0% · 0.0 Mb/s", 8, self.MUTED); progress_label.pack(side="right")
             bar = ttk.Progressbar(card, maximum=100, value=0,
                                   style="Upload.Horizontal.TProgressbar" if direction == "outgoing"
@@ -712,7 +867,7 @@ class App:
             bar.pack(fill="x", padx=self._p(14), pady=self._p((2, 8)))
             widgets.update(bar=bar, progress_label=progress_label)
             self.progress_widgets[direction] = widgets
-        self.activity = self._label(main, "Ready", 9, self.MUTED)
+        self.activity = self._label(main, self._t("ready"), 9, self.MUTED)
         self.activity.pack(anchor="w", padx=self._p(34), pady=self._p((0, 22)))
         if DND_FILES:
             self.drop.drop_target_register(DND_FILES)
@@ -721,8 +876,8 @@ class App:
     def _render_connections(self):
         for child in self.connection_list.winfo_children(): child.destroy()
         if not self.config.get("connections"):
-            self._label(self.connection_list, "No connections yet", 10, self.TEXT).pack(anchor="w", padx=self._p(12), pady=self._p((12, 3)))
-            self._label(self.connection_list, "Enter a 3-digit code above\nto add someone.", 9, self.MUTED,
+            self._label(self.connection_list, self._t("no_connections"), 10, self.TEXT).pack(anchor="w", padx=self._p(12), pady=self._p((12, 3)))
+            self._label(self.connection_list, self._t("enter_code"), 9, self.MUTED,
                         justify="left").pack(anchor="w", padx=self._p(12))
             return
         for item in self.config.get("connections", []):
@@ -731,35 +886,35 @@ class App:
             known = self.is_online
             dot = "●"; color = self.GREEN if known and item.get("online") else self.RED if known else self.MUTED
             self._label(row, dot, 9, color).pack(side="left", padx=self._p((10, 8)), pady=self._p(10))
-            self._label(row, item.get("name", "User"), 10).pack(side="left")
-            state = "Online" if known and item.get("online") else "Offline" if known else "Status unknown"
+            self._label(row, item.get("name", self._t("user")), 10).pack(side="left")
+            state = self._t("online") if known and item.get("online") else self._t("offline") if known else self._t("status_unknown")
             self._label(row, f"{state}  ·  {item['code']}", 9, self.MUTED).pack(side="right", padx=self._p(10))
             for widget in (row, *row.winfo_children()):
-                widget.bind("<Button-1>", lambda _, code=item["code"], name=item.get("name", "User"): self._select(code, name))
+                widget.bind("<Button-1>", lambda _, code=item["code"], name=item.get("name", self._t("user")): self._select(code, name))
 
     def _select(self, code, name):
         self.selected_code = code
         self.selected_name = name
         self.title.config(text=name)
-        self.subtitle.config(text=f"Secure connection • code {code}")
+        self.subtitle.config(text=self._t("secure_connection", code=code))
 
     def _add_connection(self):
         code = self.code_entry.get().strip()
         if len(code) != 3 or not code.isdigit():
-            self._alert("Check the connection code", "Enter exactly three digits, for example 042.")
+            self._alert(self._t("check_code"), self._t("check_code_body"))
             return
         self.network.command({"type": "add_connection", "code": code})
         self.code_entry.delete(0, "end")
 
     def _server_settings(self):
-        dialog = self._modal("Profile & server", 420, 390)
-        self._label(dialog, "Profile & relay server", 17, weight="bold").pack(anchor="w", padx=self._p(28), pady=self._p((24, 12)))
+        dialog = self._modal(self._t("profile_server"), 420, 485)
+        self._label(dialog, self._t("profile_title"), 17, weight="bold").pack(anchor="w", padx=self._p(28), pady=self._p((24, 12)))
         form = tk.Frame(dialog, bg=self.PANEL); form.pack(fill="x", padx=self._p(28))
-        self._label(form, "Nickname", 9, self.MUTED).grid(row=0, column=0, columnspan=2, sticky="w")
+        self._label(form, self._t("nickname"), 9, self.MUTED).grid(row=0, column=0, columnspan=2, sticky="w")
         nickname = tk.Entry(form, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat", font=("Segoe UI", 10))
         nickname.grid(row=1, column=0, columnspan=2, sticky="ew", ipady=self._p(8)); nickname.insert(0, self.config["name"])
-        self._label(form, "Address", 9, self.MUTED).grid(row=2, column=0, sticky="w", pady=self._p((12, 0)))
-        self._label(form, "Port", 9, self.MUTED).grid(row=2, column=1, sticky="w", padx=self._p((12, 0)), pady=self._p((12, 0)))
+        self._label(form, self._t("address"), 9, self.MUTED).grid(row=2, column=0, sticky="w", pady=self._p((12, 0)))
+        self._label(form, self._t("port"), 9, self.MUTED).grid(row=2, column=1, sticky="w", padx=self._p((12, 0)), pady=self._p((12, 0)))
         host = tk.Entry(form, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat", font=("Segoe UI", 10))
         port = tk.Entry(form, bg=self.CARD, fg=self.TEXT, insertbackground=self.TEXT, relief="flat", width=8, font=("Segoe UI", 10))
         host.grid(row=3, column=0, sticky="ew", ipady=self._p(8)); port.grid(row=3, column=1, padx=self._p((12, 0)), ipady=self._p(8))
@@ -791,54 +946,74 @@ class App:
             host.insert(0, self.config["server"])
             port.insert(0, str(self.config["port"]))
         hint_row = tk.Frame(dialog, bg=self.PANEL); hint_row.pack(fill="x", padx=self._p(28), pady=self._p(12))
-        self._label(hint_row, "Built-in relay", 9, self.MUTED).pack(side="left")
-        self._button(hint_row, "Use default", show_default, self.CARD, padx=10, pady=5).pack(side="right")
-        self._label(dialog, "Changing the address resets the saved certificate pin.", 9, self.MUTED).pack(anchor="w", padx=self._p(28))
+        self._label(hint_row, self._t("built_in_relay"), 9, self.MUTED).pack(side="left")
+        self._button(hint_row, self._t("use_default"), show_default, self.CARD, padx=10, pady=5).pack(side="right")
+        self._label(dialog, self._t("certificate_hint"), 9, self.MUTED, justify="left",
+                    wraplength=self._p(360)).pack(anchor="w", padx=self._p(28))
+        self._label(dialog, self._t("language"), 9, self.MUTED, weight="bold").pack(anchor="w", padx=self._p(28), pady=self._p((16, 4)))
+        language_var = tk.StringVar(value=self.language)
+        language_row = tk.Frame(dialog, bg=self.PANEL); language_row.pack(anchor="w", padx=self._p(24))
+        for label, value in (("English", "en"), ("Русский", "ru")):
+            tk.Radiobutton(language_row, text=label, variable=language_var, value=value, bg=self.PANEL,
+                           fg=self.TEXT, activebackground=self.PANEL, activeforeground=self.TEXT,
+                           selectcolor=self.CARD, font=("Segoe UI", 10), cursor="hand2").pack(side="left", padx=self._p(4))
         def apply():
             if default_selected["value"]:
                 new_host, new_port = DEFAULT_SERVER, DEFAULT_PORT
             else:
                 try: new_port = int(port.get())
                 except ValueError:
-                    self._alert("Check the server port", "The port must be a number between 1 and 65535.", parent=dialog); return
+                    self._alert(self._t("check_port"), self._t("check_port_body"), parent=dialog); return
                 new_host = host.get().strip()
             new_name = nickname.get().strip()
             if not new_host or not 1 <= new_port <= 65535:
-                self._alert("Check the server details", "Enter a valid address and a port between 1 and 65535.", parent=dialog); return
+                self._alert(self._t("check_server"), self._t("check_server_body"), parent=dialog); return
             if not new_name:
-                self._alert("Choose a nickname", "Your nickname cannot be empty.", parent=dialog); return
-            if (new_host, new_port) != (self.config["server"], self.config["port"]):
+                self._alert(self._t("empty_nickname"), self._t("empty_nickname_body"), parent=dialog); return
+            new_language = language_var.get() if language_var.get() in STRINGS else "en"
+            address_changed = (new_host, new_port) != (self.config["server"], self.config["port"])
+            reconnect_required = address_changed or new_name[:24] != self.config["name"]
+            language_changed = new_language != self.language
+            if address_changed:
                 self.config["server_fingerprint"] = None
             self.config.update(server=new_host, port=new_port, use_default_server=default_selected["value"],
-                               name=new_name[:24]); save_config(self.config)
-            self.nickname_label.config(text=self.config["name"])
-            self.network.command({"type": "reconnect"}); dialog.destroy()
-        self._button(dialog, "Save and reconnect", apply).pack(anchor="e", padx=self._p(28), pady=self._p((14, 10)))
+                               name=new_name[:24], language=new_language)
+            save_config(self.config)
+            dialog.destroy()
+            self.language = new_language
+            if language_changed:
+                self._rebuild_interface()
+            else:
+                self.nickname_label.config(text=self.config["name"])
+            if reconnect_required:
+                self.network.command({"type": "reconnect"})
+        self._button(dialog, self._t("save_changes"), apply).pack(anchor="e", padx=self._p(28), pady=self._p((14, 10)))
 
     def _choose_files(self):
-        paths = filedialog.askopenfilenames(title="Choose ZIP files", filetypes=[("ZIP archives", "*.zip")])
+        paths = filedialog.askopenfilenames(title=self._t("choose_zip_files"),
+                                            filetypes=[(self._t("zip_archives"), "*.zip")])
         self._send_paths(paths)
 
     def _send_paths(self, paths):
         if not self.selected_code:
-            self._alert("Choose a connection", "Select the person who should receive these files first.", tone="info")
+            self._alert(self._t("choose_connection"), self._t("select_recipient"), tone="info")
             return
         valid = [p for p in paths if Path(p).is_file() and Path(p).suffix.lower() == ".zip" and zipfile.is_zipfile(p)]
         invalid = [p for p in paths if p not in valid]
         if invalid:
-            self._alert("Some files were skipped", "Only valid ZIP archives can be sent.", tone="info")
+            self._alert(self._t("files_skipped"), self._t("valid_zip_only"), tone="info")
         if valid:
             self.network.command({"type": "queue_files", "recipient": self.selected_code, "paths": valid})
             if self.is_online:
-                self.activity.config(text=f"Queued {len(valid)} file(s) for sequential sending")
+                self.activity.config(text=self._t("queued_files", count=len(valid)))
             else:
-                self.activity.config(text=f"Queued {len(valid)} file(s) — sending will begin when the server reconnects")
+                self.activity.config(text=self._t("queued_files_offline", count=len(valid)))
 
     def _set_progress(self, event):
         direction = event.get("direction", "outgoing")
         widgets = self.progress_widgets[direction]
         size = max(1, int(event.get("size", 0)))
-        filename = event.get("filename", "Transfer")
+        filename = event.get("filename", self._t("no_active_transfer"))
         transferred = max(int(event.get("uploaded", 0)), int(event.get("downloaded", 0)))
         now = time.monotonic()
         sample = self.progress_samples.get(direction)
@@ -856,20 +1031,20 @@ class App:
         widgets["progress_label"].config(text=f"{value:.1f}% · {speed_mbps:.1f} Mb/s")
 
     def _incoming(self, item):
-        dialog = self._modal("Incoming file", 430, 235)
-        self._label(dialog, "Incoming ZIP file", 17, weight="bold").pack(pady=self._p((24, 6)))
-        self._label(dialog, f"{item.get('sender_name', 'User')} wants to send", 10, self.MUTED).pack()
+        dialog = self._modal(self._t("incoming_file"), 430, 235)
+        self._label(dialog, self._t("incoming_zip"), 17, weight="bold").pack(pady=self._p((24, 6)))
+        self._label(dialog, self._t("wants_to_send", sender=item.get("sender_name", self._t("user"))), 10, self.MUTED).pack()
         self._label(dialog, item["filename"], 12, weight="bold").pack(pady=self._p((8, 2)))
-        self._label(dialog, f"{item['size'] / 1048576:.1f} MB", 9, self.MUTED).pack()
+        self._label(dialog, self._t("size_mb", size=item["size"] / 1048576), 9, self.MUTED).pack()
         buttons = tk.Frame(dialog, bg=self.PANEL); buttons.pack(pady=self._p(20))
         def receive():
-            folder = filedialog.askdirectory(parent=dialog, title="Choose download folder")
+            folder = filedialog.askdirectory(parent=dialog, title=self._t("choose_download_folder"))
             if folder:
                 self.network.command({"type": "accept", "transfer_id": item["transfer_id"], "folder": folder,
                                       "filename": item["filename"], "size": item["size"]})
                 dialog.destroy()
-        self._button(buttons, "Reject", lambda: (self.network.command({"type": "reject", "transfer_id": item["transfer_id"]}), dialog.destroy()), self.RED).pack(side="left", padx=self._p(6))
-        self._button(buttons, "Receive", receive, self.GREEN).pack(side="left", padx=self._p(6))
+        self._button(buttons, self._t("reject"), lambda: (self.network.command({"type": "reject", "transfer_id": item["transfer_id"]}), dialog.destroy()), self.RED).pack(side="left", padx=self._p(6))
+        self._button(buttons, self._t("receive"), receive, self.GREEN).pack(side="left", padx=self._p(6))
 
     def _poll(self):
         try:
@@ -879,23 +1054,25 @@ class App:
                     online = event["online"]
                     self.is_online = online
                     if online and event.get("verified", True):
-                        self.status.config(text="● Connected · checking…", fg=self.GREEN)
+                        self.status.config(text=self._t("connected_checking"), fg=self.GREEN)
                     elif online:
-                        self.status.config(text="● Connected", fg=self.GREEN)
+                        self.status.config(text=self._t("connected"), fg=self.GREEN)
                     else:
-                        self.status.config(text="● Server unavailable", fg=self.RED)
+                        self.last_latency_ms = None
+                        self.status.config(text=self._t("server_unavailable"), fg=self.RED)
                     if online:
                         if not self.network.file_queue:
-                            self.activity.config(text="Ready to send files")
+                            self.activity.config(text=self._t("ready_to_send"))
                     else:
                         retry = event.get("retry_in", 3)
                         if event.get("duplicate"):
-                            self.activity.config(text="This identity is open elsewhere — close the other copy to reconnect")
+                            self.activity.config(text=self._t("identity_elsewhere"))
                         else:
-                            self.activity.config(text=f"Server unavailable — retrying automatically in {retry} seconds")
+                            self.activity.config(text=self._t("retrying", seconds=retry))
                     self._render_connections()
                 elif kind == "health":
-                    self.status.config(text=f"● Connected · {event['latency_ms']} ms", fg=self.GREEN)
+                    self.last_latency_ms = event["latency_ms"]
+                    self.status.config(text=self._t("connected_latency", latency=self.last_latency_ms), fg=self.GREEN)
                 elif kind == "welcome":
                     self.code_label.config(text=event["code"])
                 elif kind in {"connections", "connection_added", "presence"}:
@@ -904,12 +1081,13 @@ class App:
                     self._set_progress({**event, "direction": "incoming", "uploaded": 0, "downloaded": 0})
                     self._incoming(event)
                 elif kind == "transfer_progress": self._set_progress(event)
-                elif kind == "sending_status": self.activity.config(text=event["text"])
-                elif kind == "upload_complete": self.activity.config(text="File streamed to receiver")
-                elif kind == "delivered": self.activity.config(text="Delivered successfully")
-                elif kind == "received_file": self._alert("Download complete", f"Saved to:\n{event['path']}", tone="info")
-                elif kind == "rejected": self.activity.config(text=f"{event['filename']} was rejected")
-                elif kind == "error": self._alert("Unable to complete that action", friendly_error(event.get("message", "")))
+                elif kind == "sending_status":
+                    self.activity.config(text=self._t(event.get("key", "error_generic"), **event.get("values", {})))
+                elif kind == "upload_complete": self.activity.config(text=self._t("file_streamed"))
+                elif kind == "delivered": self.activity.config(text=self._t("delivered"))
+                elif kind == "received_file": self._alert(self._t("download_complete"), self._t("saved_to", path=event["path"]), tone="info")
+                elif kind == "rejected": self.activity.config(text=self._t("file_rejected", filename=event["filename"]))
+                elif kind == "error": self._alert(self._t("unable_action"), friendly_error(event.get("message", ""), self.language))
         except queue.Empty:
             pass
         self.code_label.config(text=self.config.get("code", "---"))

@@ -83,11 +83,26 @@ class CoreTests(unittest.TestCase):
             with mock.patch.object(client, "APP_DIR", Path(folder)), mock.patch.object(client, "CONFIG_PATH", config_path):
                 config = client.load_config()
         self.assertTrue(config["use_default_server"])
+        self.assertEqual("en", config["language"])
+
+    def test_saved_language_is_loaded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config_path = Path(folder) / "connections.json"
+            config_path.write_text(json.dumps({"language": "ru"}), "utf-8")
+            with mock.patch.object(client, "APP_DIR", Path(folder)), mock.patch.object(client, "CONFIG_PATH", config_path):
+                config = client.load_config()
+        self.assertEqual("ru", config["language"])
 
     def test_technical_errors_are_user_friendly(self):
         self.assertIn("server cannot be reached", friendly_error("not connected").lower())
         self.assertIn("no user was found", friendly_error("invalid connection code").lower())
         self.assertIn("disconnected", friendly_error("receiver disconnected during transfer").lower())
+        self.assertIn("сервер", friendly_error("not connected", "ru").lower())
+
+    def test_localizations_have_matching_keys(self):
+        self.assertEqual(set(client.STRINGS["en"]), set(client.STRINGS["ru"]))
+        self.assertEqual("Выберите контакт", client.translate("ru", "choose_connection"))
+        self.assertEqual("Choose a connection", client.translate("unsupported", "choose_connection"))
 
     def test_display_metrics_adapt_and_remain_bounded(self):
         laptop = calculate_display_metrics(1366, 768, 1.0)
