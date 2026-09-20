@@ -1,0 +1,28 @@
+name: Build Windows client
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - deployment-and-windows-build
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Build executable
+        shell: pwsh
+        run: .\build_windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FileSharing-windows
+          path: |
+            dist/FileSharing.exe
+            dist/FileSharing.exe.sha256

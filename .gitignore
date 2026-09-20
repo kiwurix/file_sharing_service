@@ -1,5 +1,8 @@
 .venv/
 .validation-env/
+.build-venv/
 __pycache__/
 *.py[cod]
 buffer/
+build/
+dist/

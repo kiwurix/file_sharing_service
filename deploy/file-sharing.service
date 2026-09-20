@@ -1,0 +1,18 @@
+[Unit]
+Description=File Sharing Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user
+Group=user
+WorkingDirectory=/opt/file-sharing
+ExecStart=/opt/file-sharing/.venv/bin/python /opt/file-sharing/server.py --host 0.0.0.0 --port 52007 --buffer /opt/file-sharing/buffer
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
