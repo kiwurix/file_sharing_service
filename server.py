@@ -1,43 +1,30 @@
-"""TLS relay and bounded, disk-backed transfer queue."""
+"""TLS control service and streaming TCP file relay."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import os
 import secrets
 import ssl
 import tempfile
 import time
-import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from protocol import CHUNK_SIZE, HEARTBEAT_TIMEOUT, read_frame, send_frame
 from logging_utils import configure_logging
 
-PAIR_LIMIT = 1024 ** 3
 MAX_CONNECTIONS = 5
 CLIENT_LOG_SIZE = 5 * 1024 * 1024
 CLIENT_LOG_BACKUPS = 3
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(CHUNK_SIZE), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 class RelayServer:
     def __init__(self, buffer_dir: Path):
         self.root = buffer_dir.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.files = self.root / "files"
-        self.files.mkdir(exist_ok=True)
         self.client_logs = self.root / "client_logs"
         self.client_logs.mkdir(exist_ok=True)
         self.state_path = self.root / "state.json"
@@ -45,7 +32,6 @@ class RelayServer:
         self.state = self._load_state()
         self.online: dict[str, asyncio.StreamWriter] = {}
         self.writer_locks: dict[str, asyncio.Lock] = {}
-        self.locks: dict[str, asyncio.Lock] = {}
         self.progress_sent: dict[tuple[str, str], float] = {}
         self._recover_interrupted_transfers()
         self.log.info("Relay state loaded: users=%d connections=%d pending_transfers=%d",
@@ -54,13 +40,12 @@ class RelayServer:
 
     def _recover_interrupted_transfers(self) -> None:
         interrupted = [transfer_id for transfer_id, item in self.state["transfers"].items()
-                       if item.get("status") == "uploading"]
+                       if item.get("status") != "offered"]
         for transfer_id in interrupted:
-            (self.files / f"{transfer_id}.part").unlink(missing_ok=True)
             self.state["transfers"].pop(transfer_id, None)
         if interrupted:
             self.save()
-            self.log.warning("Removed %d interrupted upload(s) during startup recovery", len(interrupted))
+            self.log.warning("Removed %d interrupted transfer(s) during startup recovery", len(interrupted))
 
     def _load_state(self) -> dict:
         if self.state_path.exists():
@@ -134,11 +119,6 @@ class RelayServer:
             stream.write(f"\n--- received {safe_source} ---\n".encode("utf-8"))
             stream.write(payload.replace(b"\x00", b""))
 
-    def pair_usage(self, one: str, two: str) -> int:
-        pair = {one, two}
-        return sum(int(t["size"]) for t in self.state["transfers"].values()
-                   if {t["sender"], t["recipient"]} == pair and t["status"] != "received")
-
     async def initial_events(self, token: str) -> None:
         await self.tell(token, {"type": "connections", "items": [self.public_user(t) for t in self.user_connections(token)]})
         for transfer_id, item in list(self.state["transfers"].items()):
@@ -146,13 +126,11 @@ class RelayServer:
                 if item["status"] == "offered":
                     await self.tell(token, {"type": "offer_restored", "transfer_id": transfer_id,
                                             "filename": item["filename"], "size": item["size"]})
-                elif item["status"] == "ready":
-                    await self.tell(token, {"type": "upload_complete", "transfer_id": transfer_id})
             if item["recipient"] != token:
                 continue
             event = dict(item)
-            event.update(type="incoming_offer" if item["status"] == "offered" else "transfer_ready", transfer_id=transfer_id)
-            if item["status"] in {"offered", "ready"}:
+            event.update(type="incoming_offer", transfer_id=transfer_id)
+            if item["status"] == "offered":
                 await self.tell(token, event)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -172,8 +150,8 @@ class RelayServer:
             self.online[token] = writer
             self.writer_locks[token] = asyncio.Lock()
             await self.tell(token, {"type": "welcome", "token": token, "code": user["code"], "name": user["name"],
-                                    "protocol_version": 2,
-                                    "capabilities": ["heartbeat", "client_logs", "state_sync"]})
+                                    "protocol_version": 3,
+                                    "capabilities": ["heartbeat", "client_logs", "state_sync", "streaming_relay"]})
             peer = writer.get_extra_info("peername")
             self.log.info("Client connected: code=%s address=%s", user["code"], peer[0] if peer else "unknown")
             await self.initial_events(token)
@@ -204,7 +182,7 @@ class RelayServer:
                 pass
         finally:
             if token and self.online.get(token) is writer:
-                await self.cancel_uploads(token)
+                await self.cancel_streams(token)
                 self.online.pop(token, None)
                 self.writer_locks.pop(token, None)
                 for peer in self.user_connections(token):
@@ -217,14 +195,15 @@ class RelayServer:
             except (ConnectionError, OSError, ssl.SSLError):
                 pass
 
-    async def cancel_uploads(self, sender: str) -> None:
+    async def cancel_streams(self, token: str) -> None:
         interrupted = [(transfer_id, item) for transfer_id, item in self.state["transfers"].items()
-                       if item["sender"] == sender and item["status"] == "uploading"]
+                       if (token in {item["sender"], item["recipient"]} and item["status"] == "streaming")
+                       or (token == item["recipient"] and item["status"] == "awaiting_receipt")]
         for transfer_id, item in interrupted:
-            (self.files / f"{transfer_id}.part").unlink(missing_ok=True)
             self.state["transfers"].pop(transfer_id, None)
-            await self.tell(item["recipient"], {"type": "transfer_cancelled", "transfer_id": transfer_id})
-            self.log.warning("Interrupted upload removed after disconnect: id=%s", transfer_id[:8])
+            other = item["recipient"] if token == item["sender"] else item["sender"]
+            await self.tell(other, {"type": "transfer_cancelled", "transfer_id": transfer_id})
+            self.log.warning("Interrupted stream removed after disconnect: id=%s", transfer_id[:8])
         if interrupted:
             self.save()
 
@@ -253,9 +232,7 @@ class RelayServer:
         elif kind == "chunk":
             await self.chunk(token, message["transfer_id"], payload)
         elif kind == "finish":
-            await self.finish(token, message["transfer_id"])
-        elif kind == "download":
-            await self.download(token, message["transfer_id"])
+            await self.finish(token, message["transfer_id"], message.get("sha256"))
         elif kind == "received":
             await self.received(token, message["transfer_id"])
         elif kind == "ping":
@@ -270,9 +247,8 @@ class RelayServer:
 
     async def cancel_transfer(self, sender: str, transfer_id: str) -> None:
         item = self.state["transfers"].get(transfer_id)
-        if not item or item["sender"] != sender or item["status"] not in {"offered", "uploading"}:
+        if not item or item["sender"] != sender or item["status"] not in {"offered", "streaming"}:
             return
-        (self.files / f"{transfer_id}.part").unlink(missing_ok=True)
         self.state["transfers"].pop(transfer_id, None)
         self.save()
         await self.tell(item["recipient"], {"type": "transfer_cancelled", "transfer_id": transfer_id})
@@ -286,12 +262,10 @@ class RelayServer:
             raise ValueError("recipient is not a connection")
         if Path(filename).suffix.lower() != ".zip" or size < 0:
             raise ValueError("only valid .zip files are supported")
-        if self.pair_usage(sender, recipient) + size > PAIR_LIMIT:
-            raise ValueError("pair buffer limit (1 GB) exceeded")
         transfer_id = secrets.token_hex(16)
         item = {"sender": sender, "recipient": recipient, "sender_code": self.state["users"][sender]["code"],
                 "sender_name": self.state["users"][sender]["name"], "filename": filename, "size": size,
-                "sha256": str(message.get("sha256", "")), "status": "offered", "received_bytes": 0}
+                "status": "offered", "received_bytes": 0}
         self.state["transfers"][transfer_id] = item
         self.save()
         self.log.info("Transfer offered: id=%s sender=%s recipient=%s size=%d", transfer_id[:8],
@@ -310,80 +284,57 @@ class RelayServer:
             self.log.info("Transfer rejected: id=%s", transfer_id[:8])
             await self.tell(item["sender"], {"type": "rejected", "transfer_id": transfer_id, "filename": item["filename"]})
         else:
-            item["status"] = "uploading"
+            if recipient not in self.online or item["sender"] not in self.online:
+                raise ValueError("both clients must be online to start a transfer")
+            item["status"] = "streaming"
             self.save()
             self.log.info("Transfer accepted: id=%s", transfer_id[:8])
             await self.tell(item["sender"], {"type": "accepted", "transfer_id": transfer_id})
 
     async def chunk(self, sender: str, transfer_id: str, payload: bytes) -> None:
         item = self.state["transfers"].get(transfer_id)
-        if not item or item["sender"] != sender or item["status"] != "uploading":
+        if not item or item["sender"] != sender or item["status"] != "streaming":
             raise ValueError("transfer is not accepting data")
         if item["received_bytes"] + len(payload) > item["size"]:
             raise ValueError("received more data than offered")
-        lock = self.locks.setdefault(transfer_id, asyncio.Lock())
-        async with lock:
-            with (self.files / f"{transfer_id}.part").open("ab") as stream:
-                stream.write(payload)
-            item["received_bytes"] += len(payload)
+        delivered = await self.tell(item["recipient"], {"type": "download_chunk", "transfer_id": transfer_id}, payload)
+        if not delivered:
+            self.state["transfers"].pop(transfer_id, None)
+            self.save()
+            raise ValueError("receiver disconnected during transfer")
+        item["received_bytes"] += len(payload)
         now = time.monotonic()
         progress_key = (transfer_id, "upload")
         if now - self.progress_sent.get(progress_key, 0) >= 1 or item["received_bytes"] == item["size"]:
             self.progress_sent[progress_key] = now
-            progress = {"type": "transfer_progress", "transfer_id": transfer_id, "filename": item["filename"],
-                        "uploaded": item["received_bytes"], "downloaded": 0, "size": item["size"]}
-            await self.tell(sender, {**progress, "direction": "outgoing"})
-            await self.tell(item["recipient"], {**progress, "direction": "incoming"})
+            await self.tell(sender, {"type": "transfer_progress", "direction": "outgoing",
+                            "transfer_id": transfer_id, "filename": item["filename"],
+                            "uploaded": item["received_bytes"], "downloaded": item["received_bytes"],
+                            "size": item["size"]})
 
-    async def finish(self, sender: str, transfer_id: str) -> None:
+    async def finish(self, sender: str, transfer_id: str, sha256: object) -> None:
         item = self.state["transfers"].get(transfer_id)
-        path = self.files / f"{transfer_id}.part"
         if not item or item["sender"] != sender or item["received_bytes"] != item["size"]:
             raise ValueError("incomplete upload")
-        digest = await asyncio.to_thread(file_sha256, path)
-        if digest != item["sha256"]:
-            path.unlink(missing_ok=True)
+        digest = str(sha256 or "").lower()
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise ValueError("invalid file checksum")
+        item["sha256"] = digest
+        item["status"] = "awaiting_receipt"; self.save()
+        if not await self.tell(item["recipient"], {"type": "download_complete", "transfer_id": transfer_id,
+                                                   "sha256": digest}):
             self.state["transfers"].pop(transfer_id, None); self.save()
-            raise ValueError("file checksum mismatch")
-        if not await asyncio.to_thread(zipfile.is_zipfile, path):
-            path.unlink(missing_ok=True)
-            self.state["transfers"].pop(transfer_id, None); self.save()
-            raise ValueError("the uploaded file is not a valid ZIP archive")
-        item["status"] = "ready"; self.save()
-        self.log.info("Upload verified and buffered: id=%s size=%d", transfer_id[:8], item["size"])
-        event = dict(item); event.update(type="transfer_ready", transfer_id=transfer_id)
-        await self.tell(item["recipient"], event)
+            raise ValueError("receiver disconnected during transfer")
+        self.log.info("Stream relayed: id=%s size=%d", transfer_id[:8], item["size"])
         await self.tell(sender, {"type": "upload_complete", "transfer_id": transfer_id})
-
-    async def download(self, recipient: str, transfer_id: str) -> None:
-        item = self.state["transfers"].get(transfer_id)
-        if not item or item["recipient"] != recipient or item["status"] != "ready":
-            raise ValueError("download is not ready")
-        path = self.files / f"{transfer_id}.part"
-        downloaded = 0
-        with path.open("rb") as stream:
-            while block := stream.read(CHUNK_SIZE):
-                await self.tell(recipient, {"type": "download_chunk", "transfer_id": transfer_id}, block)
-                downloaded += len(block)
-                now = time.monotonic()
-                progress_key = (transfer_id, "download")
-                if now - self.progress_sent.get(progress_key, 0) >= 1 or downloaded == item["size"]:
-                    self.progress_sent[progress_key] = now
-                    await self.tell(item["sender"], {"type": "transfer_progress", "direction": "outgoing",
-                                    "transfer_id": transfer_id, "filename": item["filename"],
-                                    "uploaded": item["size"], "downloaded": downloaded, "size": item["size"]})
-        await self.tell(recipient, {"type": "download_complete", "transfer_id": transfer_id, "sha256": item["sha256"]})
-        self.log.info("Buffered download sent: id=%s size=%d", transfer_id[:8], downloaded)
 
     async def received(self, recipient: str, transfer_id: str) -> None:
         item = self.state["transfers"].get(transfer_id)
         if not item or item["recipient"] != recipient:
             return
-        (self.files / f"{transfer_id}.part").unlink(missing_ok=True)
         self.progress_sent.pop((transfer_id, "upload"), None)
-        self.progress_sent.pop((transfer_id, "download"), None)
         self.state["transfers"].pop(transfer_id, None); self.save()
-        self.log.info("Transfer delivered and removed: id=%s", transfer_id[:8])
+        self.log.info("Transfer delivery acknowledged: id=%s", transfer_id[:8])
         await self.tell(item["sender"], {"type": "delivered", "transfer_id": transfer_id})
 
 

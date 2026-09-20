@@ -11,9 +11,10 @@ Encrypted ZIP-file sharing with a lightweight desktop client and a persistent re
 - Simultaneous transfers in both directions
 - TLS-encrypted traffic with certificate pinning
 - SHA-256 integrity verification
-- Disk-backed relay buffer limited to 1 GiB per user pair
+- Single-pass sending: SHA-256 is calculated while bytes are already being streamed
+- Live TCP+TLS streaming with bounded backpressure and no server-side file buffer
 - Maximum five connections per user
-- Exact upload/download progress with network updates throttled to once per second
+- Monotonic streamed/delivered progress with network updates throttled to once per second
 - DPI-aware, resolution-adaptive interface from laptop displays through 4K
 - Three-second heartbeat with automatic presence repair and reconnect recovery
 - One desktop instance per Windows user session
@@ -23,12 +24,12 @@ Encrypted ZIP-file sharing with a lightweight desktop client and a persistent re
 
 | Path | Purpose |
 | --- | --- |
-| `server.py` | TLS relay, identity registry, connections, and buffered queues |
+| `server.py` | TLS streaming relay, identity registry, and connections |
 | `client.py` | Desktop interface and network client |
 | `protocol.py` | Shared framed network protocol |
 | `main.py` | Client entry point |
 | `tests/` | Unit and end-to-end TLS transfer tests |
-| `buffer/` | Runtime-only server state, certificate, key, and pending files |
+| `buffer/` | Runtime-only server state, certificate, key, logs, and client diagnostics |
 
 ## Logs
 
@@ -67,8 +68,9 @@ The server keeps its persistent runtime data in `buffer/` inside this project. T
 - `state.json`: user identities, codes, nicknames, connections, and transfer metadata
 - `server-cert.pem`: self-signed TLS certificate
 - `server-key.pem`: private TLS key
-- `files/`: incomplete and pending transfers
 - `client_logs/`: rotating diagnostics uploaded by clients, grouped by client code
+
+File payloads are never stored on the relay. After the receiver accepts, each chunk is forwarded immediately over the existing TCP+TLS connections. TCP flow control slows the sender when the receiver is slower, so memory use remains bounded by the networking stack and one protocol chunk.
 
 Do not delete or replace `state.json`, `server-cert.pem`, or `server-key.pem` during normal updates. Deleting `state.json` resets every user code and connection. Replacing the certificate causes existing clients to reject the server until their saved certificate pin is reset.
 
@@ -148,7 +150,7 @@ This file contains the stable client token, assigned code, nickname, server cert
 
 Changing IP addresses does not affect identities or connections. They remain stable while both the client `connections.json` and server `buffer/state.json` are preserved.
 
-The sidebar connection indicator is authoritative only while the client shows **Connected**. A heartbeat runs every three seconds and refreshes the full connection presence list; if no server traffic is received for ten seconds, the client immediately changes to **Server unavailable** and reconnects automatically. Interrupted uploads are retried from the beginning after state synchronization. Completed buffered uploads remain available after a relay restart.
+The sidebar connection indicator is authoritative only while the client shows **Connected**. A heartbeat runs every three seconds and refreshes the full connection presence list; if no server traffic is received for ten seconds, the client immediately changes to **Server unavailable** and reconnects automatically. Interrupted streams are retried from the beginning after state synchronization. Transfers require both clients to remain online; the relay does not retain completed files.
 
 When deploying this protocol version, update and restart the server before distributing the new client. New clients can still connect to an older relay, but heartbeat verification, state repair, and client-log upload remain unavailable until the relay is upgraded.
 
@@ -160,7 +162,7 @@ Run the complete test suite:
 python -m unittest discover -v
 ```
 
-The suite verifies identity persistence, code stability, TLS certificate generation, ZIP validation, framed transport, progress throttling, and the complete offer/upload/download/cleanup lifecycle.
+The suite verifies identity persistence, code stability, TLS certificate generation, ZIP validation, framed transport, progress throttling, and the complete offer/stream/receipt lifecycle.
 
 ## Backup and updates
 
@@ -171,7 +173,7 @@ The suite verifies identity persistence, code stability, TLS certificate generat
 5. Run the tests.
 6. Restart the relay and inspect its logs.
 
-Queued files may be active while the service is running, so do not copy or modify `buffer/` during a live backup.
+Transfer metadata may change while the service is running, so do not copy or modify `buffer/` during a live backup.
 
 ## Operating rules for automation agents
 

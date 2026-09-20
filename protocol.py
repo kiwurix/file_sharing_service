@@ -18,8 +18,7 @@ async def send_frame(writer: asyncio.StreamWriter, message: dict, payload: bytes
     encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
     if len(encoded) > MAX_HEADER:
         raise ValueError("protocol header is too large")
-    writer.write(struct.pack("!I", len(encoded)))
-    writer.write(encoded)
+    writer.write(struct.pack("!I", len(encoded)) + encoded)
     if payload:
         writer.write(payload)
     await writer.drain()

@@ -36,14 +36,6 @@ DEFAULT_PORT = 52007
 LOG_UPLOAD_CHUNK = 256 * 1024
 
 
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(CHUNK_SIZE), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def enable_high_dpi() -> None:
     """Ask Windows for real monitor pixels instead of a bitmap-scaled window."""
     if os.name != "nt":
@@ -82,7 +74,7 @@ def friendly_error(message: str) -> str:
         (("timed out", "timeout"), "The server took too long to respond. Check your connection and try again."),
         (("invalid connection code",), "No user was found with that code. Check the three digits and try again."),
         (("connection limit reached",), "This connection cannot be added because one of you already has five connections."),
-        (("pair buffer limit",), "This transfer would exceed the 1 GB pending-file limit for this connection."),
+        (("receiver disconnected", "both clients must be online"), "The other user disconnected. The transfer will restart when both of you are online."),
         (("only valid .zip", "not a valid zip"), "Only valid ZIP archives can be sent. Create or choose a ZIP file and try again."),
         (("transfer is no longer available",), "This transfer is no longer available. Ask the sender to send it again."),
         (("checksum mismatch", "integrity check"), "The file did not arrive intact. It was removed; please send it again."),
@@ -275,12 +267,11 @@ class NetworkClient:
                 partial = destination.with_suffix(destination.suffix + ".part")
                 stream = partial.open("wb")
                 self.downloads[transfer_id] = {"destination": destination, "stream": stream, "digest": hashlib.sha256(),
-                                               "size": int(message["size"]), "received": 0, "filename": message["filename"]}
+                                               "size": int(message["size"]), "received": 0,
+                                               "filename": message["filename"], "last_progress": 0.0}
                 await self.send({"type": "accept", "transfer_id": transfer_id})
             elif kind in {"reject", "add_connection"}:
                 await self.send({"type": kind, **message})
-            elif kind == "download":
-                await self.send({"type": "download", "transfer_id": message["transfer_id"]})
             elif kind == "reconnect":
                 if self.writer:
                     self.writer.close()
@@ -306,9 +297,8 @@ class NetworkClient:
         self.active_transfer = request_id
         self.events.put({"type": "transfer_progress", "direction": "outgoing", "filename": path.name,
                          "uploaded": 0, "downloaded": 0, "size": path.stat().st_size})
-        digest = await asyncio.to_thread(file_sha256, path)
         await self.send({"type": "offer", "request_id": request_id, "recipient": recipient,
-                         "filename": path.name, "size": path.stat().st_size, "sha256": digest})
+                         "filename": path.name, "size": path.stat().st_size})
         self.log.info("Transfer offered: recipient=%s size=%d", recipient, path.stat().st_size)
         self.events.put({"type": "sending_status", "text": f"Waiting for {recipient} to accept {path.name}"})
 
@@ -320,17 +310,15 @@ class NetworkClient:
 
     async def _upload(self, transfer_id: str, path: Path) -> None:
         try:
-            uploaded = 0
             size = path.stat().st_size
+            digest = hashlib.sha256()
             with path.open("rb") as stream:
                 while block := stream.read(CHUNK_SIZE):
+                    digest.update(block)
                     await self.send({"type": "chunk", "transfer_id": transfer_id}, block)
-                    uploaded += len(block)
-                    self.events.put({"type": "transfer_progress", "direction": "outgoing", "filename": path.name,
-                                     "uploaded": uploaded, "downloaded": 0, "size": size})
-            await self.send({"type": "finish", "transfer_id": transfer_id})
-            self.log.info("Upload sent: id=%s size=%d", transfer_id[:8], size)
-        except Exception as exc:
+            await self.send({"type": "finish", "transfer_id": transfer_id, "sha256": digest.hexdigest()})
+            self.log.info("Stream sent to relay: id=%s size=%d", transfer_id[:8], size)
+        except Exception:
             self.log.exception("Upload failed: id=%s", transfer_id[:8])
             self.pending_paths.pop(transfer_id, None)
             self.active_transfer = None
@@ -406,26 +394,16 @@ class NetworkClient:
             self.events.put(message)
             await self._advance_queue()
             return
-        elif kind == "transfer_ready":
-            self.restored_incoming.add(message["transfer_id"])
-            # A reconnect may deliver a completed accepted transfer.
-            if message["transfer_id"] not in self.downloads:
-                self.events.put(message)
-                return
-            target = self.downloads[message["transfer_id"]]
-            target["stream"].close()
-            partial = target["destination"].with_suffix(target["destination"].suffix + ".part")
-            target.update(stream=partial.open("wb"), digest=hashlib.sha256(), received=0)
-            await self.send({"type": "download", "transfer_id": message["transfer_id"]})
-            self.events.put({"type": "transfer_progress", "direction": "incoming", "filename": message["filename"],
-                             "uploaded": message["size"], "downloaded": 0, "size": message["size"]})
-            return
         elif kind == "download_chunk":
             target = self.downloads.get(message["transfer_id"])
             if target:
                 target["stream"].write(payload); target["digest"].update(payload); target["received"] += len(payload)
-                self.events.put({"type": "transfer_progress", "direction": "incoming", "filename": target["filename"],
-                                 "uploaded": target["size"], "downloaded": target["received"], "size": target["size"]})
+                now = time.monotonic()
+                if now - target["last_progress"] >= 0.1 or target["received"] == target["size"]:
+                    target["last_progress"] = now
+                    self.events.put({"type": "transfer_progress", "direction": "incoming",
+                                     "filename": target["filename"], "uploaded": target["received"],
+                                     "downloaded": target["received"], "size": target["size"]})
             return
         elif kind == "download_complete":
             target = self.downloads.pop(message["transfer_id"], None)
@@ -433,9 +411,12 @@ class NetworkClient:
                 destination, stream, digest = target["destination"], target["stream"], target["digest"]
                 stream.close()
                 partial = destination.with_suffix(destination.suffix + ".part")
-                if digest.hexdigest() != message["sha256"]:
+                if target["received"] != target["size"] or digest.hexdigest() != message["sha256"]:
                     partial.unlink(missing_ok=True)
                     self.events.put({"type": "error", "message": "Downloaded file failed its integrity check"})
+                elif not zipfile.is_zipfile(partial):
+                    partial.unlink(missing_ok=True)
+                    self.events.put({"type": "error", "message": "Downloaded file is not a valid ZIP archive"})
                 else:
                     os.replace(partial, destination)
                     await self.send({"type": "received", "transfer_id": message["transfer_id"]})
@@ -443,6 +424,13 @@ class NetworkClient:
                     self.events.put({"type": "received_file", "path": str(destination)})
             return
         elif kind == "transfer_cancelled":
+            if message["transfer_id"] in self.pending_paths:
+                self.pending_paths.pop(message["transfer_id"], None)
+                self.active_transfer = None
+                self.events.put({"type": "sending_status", "text": "Transfer interrupted — reconnecting to retry"})
+                if self.writer:
+                    self.writer.close()
+                return
             self._discard_download(message["transfer_id"])
             self.events.put({"type": "sending_status", "text": "Transfer interrupted — waiting for the sender to reconnect"})
             return
@@ -461,7 +449,7 @@ class NetworkClient:
                 if self.file_queue:
                     self.file_queue.popleft()
                 await self._offer_next()
-            elif operation in {"accept", "download"} and message.get("transfer_id"):
+            elif operation == "accept" and message.get("transfer_id"):
                 self._discard_download(message["transfer_id"])
             self.events.put(message)
             return
@@ -783,7 +771,7 @@ class App:
             widgets[key].configure(value=value)
             widgets[key + "_label"].config(text=f"{value:.1f}%")
 
-    def _incoming(self, item, ready=False):
+    def _incoming(self, item):
         dialog = self._modal("Incoming file", 430, 235)
         self._label(dialog, "Incoming ZIP file", 17, weight="bold").pack(pady=self._p((24, 6)))
         self._label(dialog, f"{item.get('sender_name', 'User')} wants to send", 10, self.MUTED).pack()
@@ -793,17 +781,8 @@ class App:
         def receive():
             folder = filedialog.askdirectory(parent=dialog, title="Choose download folder")
             if folder:
-                if ready:
-                    destination = available_path(folder, item["filename"])
-                    partial = destination.with_suffix(destination.suffix + ".part")
-                    stream = partial.open("wb")
-                    self.network.downloads[item["transfer_id"]] = {
-                        "destination": destination, "stream": stream, "digest": hashlib.sha256(),
-                        "size": int(item["size"]), "received": 0, "filename": item["filename"]}
-                    self.network.command({"type": "download", "transfer_id": item["transfer_id"]})
-                else:
-                    self.network.command({"type": "accept", "transfer_id": item["transfer_id"], "folder": folder,
-                                          "filename": item["filename"], "size": item["size"]})
+                self.network.command({"type": "accept", "transfer_id": item["transfer_id"], "folder": folder,
+                                      "filename": item["filename"], "size": item["size"]})
                 dialog.destroy()
         self._button(buttons, "Reject", lambda: (self.network.command({"type": "reject", "transfer_id": item["transfer_id"]}), dialog.destroy()), self.RED).pack(side="left", padx=self._p(6))
         self._button(buttons, "Receive", receive, self.GREEN).pack(side="left", padx=self._p(6))
@@ -840,12 +819,9 @@ class App:
                 elif kind == "incoming_offer":
                     self._set_progress({**event, "direction": "incoming", "uploaded": 0, "downloaded": 0})
                     self._incoming(event)
-                elif kind == "transfer_ready":
-                    self._set_progress({**event, "direction": "incoming", "uploaded": event["size"], "downloaded": 0})
-                    self._incoming(event, ready=True)
                 elif kind == "transfer_progress": self._set_progress(event)
                 elif kind == "sending_status": self.activity.config(text=event["text"])
-                elif kind == "upload_complete": self.activity.config(text="Upload secured in relay buffer")
+                elif kind == "upload_complete": self.activity.config(text="File streamed to receiver")
                 elif kind == "delivered": self.activity.config(text="Delivered successfully")
                 elif kind == "received_file": self._alert("Download complete", f"Saved to:\n{event['path']}", tone="info")
                 elif kind == "rejected": self.activity.config(text=f"{event['filename']} was rejected")

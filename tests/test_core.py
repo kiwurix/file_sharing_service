@@ -34,20 +34,18 @@ class CoreTests(unittest.TestCase):
         finally:
             second.close(); first.close()
 
-    def test_server_restart_removes_only_interrupted_uploads(self):
+    def test_server_restart_removes_all_non_offered_transfers(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             relay = RelayServer(root)
             relay.state["transfers"] = {
-                "uploading": {"status": "uploading"},
+                "uploading": {"status": "streaming"},
                 "ready": {"status": "ready"},
             }
-            (relay.files / "uploading.part").write_bytes(b"partial")
             relay.save()
             restarted = RelayServer(root)
             self.assertNotIn("uploading", restarted.state["transfers"])
-            self.assertIn("ready", restarted.state["transfers"])
-            self.assertFalse((restarted.files / "uploading.part").exists())
+            self.assertNotIn("ready", restarted.state["transfers"])
 
     def test_rotating_log_is_timestamped_and_idempotent(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -89,7 +87,7 @@ class CoreTests(unittest.TestCase):
     def test_technical_errors_are_user_friendly(self):
         self.assertIn("server cannot be reached", friendly_error("not connected").lower())
         self.assertIn("no user was found", friendly_error("invalid connection code").lower())
-        self.assertIn("1 gb", friendly_error("pair buffer limit (1 GB) exceeded").lower())
+        self.assertIn("disconnected", friendly_error("receiver disconnected during transfer").lower())
 
     def test_display_metrics_adapt_and_remain_bounded(self):
         laptop = calculate_display_metrics(1366, 768, 1.0)
@@ -170,7 +168,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             relay = RelayServer(Path(folder))
             relay.state["transfers"]["transfer"] = {
                 "sender": "one", "recipient": "two", "filename": "file.zip", "size": 4,
-                "status": "uploading", "received_bytes": 0, "sha256": "unused"}
+                "status": "streaming", "received_bytes": 0}
             messages = []
 
             async def capture(token, message, payload=b""):
@@ -181,8 +179,10 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             with mock.patch("server.time.monotonic", side_effect=[10.0, 10.2]):
                 await relay.chunk("one", "transfer", b"a")
                 await relay.chunk("one", "transfer", b"b")
-            self.assertEqual(2, len(messages))  # sender + receiver, only on the first tick
-            self.assertTrue(all(message["type"] == "transfer_progress" for _, message in messages))
+            chunks = [message for _, message in messages if message["type"] == "download_chunk"]
+            progress = [message for _, message in messages if message["type"] == "transfer_progress"]
+            self.assertEqual(2, len(chunks))
+            self.assertEqual(1, len(progress))
 
     async def test_frame_round_trip(self):
         received = asyncio.Future()
@@ -257,7 +257,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             data = data_stream.getvalue()
             digest = hashlib.sha256(data).hexdigest()
             await send_frame(one_w, {"type": "offer", "request_id": "r1", "recipient": two["code"],
-                                     "filename": "payload.zip", "size": len(data), "sha256": digest})
+                                     "filename": "payload.zip", "size": len(data)})
             created, _ = await receive_type(one_r, "offer_created")
             offered, _ = await receive_type(two_r, "incoming_offer")
             transfer_id = created["transfer_id"]
@@ -266,26 +266,21 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             accepted, _ = await receive_type(one_r, "accepted")
             self.assertEqual("accepted", accepted["type"])
             await send_frame(one_w, {"type": "chunk", "transfer_id": transfer_id}, data)
-            upload_progress, _ = await receive_type(one_r, "transfer_progress")
-            self.assertEqual(len(data), upload_progress["uploaded"])
-            self.assertEqual(0, upload_progress["downloaded"])
-            await send_frame(one_w, {"type": "finish", "transfer_id": transfer_id})
-            ready, _ = await receive_type(two_r, "transfer_ready")
-            complete, _ = await receive_type(one_r, "upload_complete")
-            self.assertEqual("transfer_ready", ready["type"])
-            self.assertEqual("upload_complete", complete["type"])
-            await send_frame(two_w, {"type": "download", "transfer_id": transfer_id})
             chunk_message, downloaded = await receive_type(two_r, "download_chunk")
-            done, _ = await receive_type(two_r, "download_complete")
             self.assertEqual("download_chunk", chunk_message["type"])
             self.assertEqual(data, downloaded)
+            upload_progress, _ = await receive_type(one_r, "transfer_progress")
+            self.assertEqual(len(data), upload_progress["uploaded"])
+            self.assertEqual(len(data), upload_progress["downloaded"])
+            await send_frame(one_w, {"type": "finish", "transfer_id": transfer_id, "sha256": digest})
+            done, _ = await receive_type(two_r, "download_complete")
+            complete, _ = await receive_type(one_r, "upload_complete")
             self.assertEqual(digest, done["sha256"])
+            self.assertEqual("upload_complete", complete["type"])
             await send_frame(two_w, {"type": "received", "transfer_id": transfer_id})
-            download_progress, _ = await receive_type(one_r, "transfer_progress")
-            self.assertEqual(len(data), download_progress["downloaded"])
             delivered, _ = await receive_type(one_r, "delivered")
             self.assertEqual("delivered", delivered["type"])
-            self.assertFalse((root / "files" / f"{transfer_id}.part").exists())
+            self.assertFalse((root / "files").exists())
             one_w.close(); two_w.close()
             await one_w.wait_closed(); await two_w.wait_closed()
             server.close(); await server.wait_closed()
