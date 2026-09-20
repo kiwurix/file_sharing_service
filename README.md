@@ -15,6 +15,8 @@ Encrypted ZIP-file sharing with a lightweight desktop client and a persistent re
 - Maximum five connections per user
 - Exact upload/download progress with network updates throttled to once per second
 - DPI-aware, resolution-adaptive interface from laptop displays through 4K
+- Three-second heartbeat with automatic presence repair and reconnect recovery
+- One desktop instance per Windows user session
 - ZIP files only
 
 ## Project layout
@@ -32,8 +34,9 @@ Encrypted ZIP-file sharing with a lightweight desktop client and a persistent re
 
 - Server: `buffer/logs/server.log`
 - Client: `%LOCALAPPDATA%\file_sharing\logs\client.log`
+- Uploaded client diagnostics: `buffer/client_logs/client-<code>.log`
 
-Logs rotate at 5 MiB and retain three backups. They include startup, connection state, rejected requests, transfer milestones, integrity checks, delivery, and cleanup. Identity tokens, certificate fingerprints, and file contents are never logged.
+Logs rotate at 5 MiB and retain three backups. They include startup, connection state, rejected requests, transfer milestones, integrity checks, delivery, and cleanup. While connected, each client sends its current and rotated diagnostic logs to the relay in throttled 256 KiB batches. The server stores them by three-digit client code so an operator can investigate both sides of a failure. Identity tokens, certificate fingerprints, and file contents are never logged.
 
 ## Server deployment
 
@@ -65,6 +68,7 @@ The server keeps its persistent runtime data in `buffer/` inside this project. T
 - `server-cert.pem`: self-signed TLS certificate
 - `server-key.pem`: private TLS key
 - `files/`: incomplete and pending transfers
+- `client_logs/`: rotating diagnostics uploaded by clients, grouped by client code
 
 Do not delete or replace `state.json`, `server-cert.pem`, or `server-key.pem` during normal updates. Deleting `state.json` resets every user code and connection. Replacing the certificate causes existing clients to reject the server until their saved certificate pin is reset.
 
@@ -143,6 +147,10 @@ Client state is stored at:
 This file contains the stable client token, assigned code, nickname, server certificate fingerprint, and cached connections. Back it up if the client identity must survive an OS reinstall.
 
 Changing IP addresses does not affect identities or connections. They remain stable while both the client `connections.json` and server `buffer/state.json` are preserved.
+
+The sidebar connection indicator is authoritative only while the client shows **Connected**. A heartbeat runs every three seconds and refreshes the full connection presence list; if no server traffic is received for ten seconds, the client immediately changes to **Server unavailable** and reconnects automatically. Interrupted uploads are retried from the beginning after state synchronization. Completed buffered uploads remain available after a relay restart.
+
+When deploying this protocol version, update and restart the server before distributing the new client. New clients can still connect to an older relay, but heartbeat verification, state repair, and client-log upload remain unavailable until the relay is upgraded.
 
 ## Validation
 

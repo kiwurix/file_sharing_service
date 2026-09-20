@@ -8,6 +8,8 @@ import struct
 
 MAX_HEADER = 64 * 1024
 CHUNK_SIZE = 1024 * 1024
+HEARTBEAT_INTERVAL = 3
+HEARTBEAT_TIMEOUT = 10
 
 
 async def send_frame(writer: asyncio.StreamWriter, message: dict, payload: bytes = b"") -> None:

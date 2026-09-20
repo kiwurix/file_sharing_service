@@ -3,9 +3,11 @@ import json
 import hashlib
 import io
 import os
+import queue
 import ssl
 import tempfile
 import unittest
+import uuid
 import zipfile
 import logging
 from pathlib import Path
@@ -16,9 +18,37 @@ from server import RelayServer, ensure_certificate
 import client
 from client import DEFAULT_PORT, DEFAULT_SERVER, calculate_display_metrics, friendly_error
 from logging_utils import configure_logging
+from single_instance import SingleInstanceGuard
 
 
 class CoreTests(unittest.TestCase):
+    def test_single_instance_guard_rejects_second_copy(self):
+        if os.name != "nt":
+            self.skipTest("Windows named mutex test")
+        name = f"Local\\FileSharingTest-{uuid.uuid4().hex}"
+        first = SingleInstanceGuard(name)
+        second = SingleInstanceGuard(name)
+        try:
+            self.assertTrue(first.is_primary)
+            self.assertFalse(second.is_primary)
+        finally:
+            second.close(); first.close()
+
+    def test_server_restart_removes_only_interrupted_uploads(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            relay = RelayServer(root)
+            relay.state["transfers"] = {
+                "uploading": {"status": "uploading"},
+                "ready": {"status": "ready"},
+            }
+            (relay.files / "uploading.part").write_bytes(b"partial")
+            relay.save()
+            restarted = RelayServer(root)
+            self.assertNotIn("uploading", restarted.state["transfers"])
+            self.assertIn("ready", restarted.state["transfers"])
+            self.assertFalse((restarted.files / "uploading.part").exists())
+
     def test_rotating_log_is_timestamped_and_idempotent(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "logs" / "test.log"
@@ -117,6 +147,24 @@ class CoreTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_client_log_delta_uploads_without_tokens(self):
+        with tempfile.TemporaryDirectory() as folder:
+            log_dir = Path(folder) / "logs"
+            log_dir.mkdir()
+            (log_dir / "client.log").write_text("diagnostic line\n", "utf-8")
+            logger = configure_logging("file_sharing.client-test", log_dir / "local-test.log")
+            network = client.NetworkClient({}, queue.Queue(), logger, log_dir)
+            sent = []
+
+            async def capture(message, payload=b""):
+                sent.append((message, payload))
+
+            network.send = capture
+            await network._send_log_delta()
+            uploaded = b"".join(payload for message, payload in sent if message["type"] == "client_log")
+            self.assertIn(b"diagnostic line", uploaded)
+            self.assertNotIn(b"token", uploaded.lower())
+
     async def test_network_progress_is_throttled(self):
         with tempfile.TemporaryDirectory() as folder:
             relay = RelayServer(Path(folder))
@@ -171,6 +219,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 await send_frame(writer, {"type": "hello", "name": name})
                 welcome, _ = await read_frame(reader)
                 await read_frame(reader)  # initial connection list
+                await read_frame(reader)  # sync complete
                 return reader, writer, welcome
 
             async def receive_type(reader, expected):
@@ -182,7 +231,25 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             one_r, one_w, one = await connect("One")
             two_r, two_w, two = await connect("Two")
             await send_frame(one_w, {"type": "add_connection", "code": two["code"]})
-            await read_frame(one_r); await read_frame(two_r)
+            await receive_type(one_r, "connection_added"); await receive_type(two_r, "connection_added")
+
+            await send_frame(one_w, {"type": "ping", "sent_at": 123.0})
+            pong, _ = await receive_type(one_r, "pong")
+            self.assertEqual(123.0, pong["sent_at"])
+            self.assertEqual(two["code"], pong["connections"][0]["code"])
+            self.assertTrue(pong["connections"][0]["online"])
+
+            await send_frame(one_w, {"type": "client_log", "source": "client.log"}, b"client diagnostic line\n")
+            await send_frame(one_w, {"type": "ping", "sent_at": 124.0})
+            await receive_type(one_r, "pong")
+            uploaded_log = root / "client_logs" / f"client-{one['code']}.log"
+            self.assertIn("client diagnostic line", uploaded_log.read_text("utf-8"))
+
+            duplicate_r, duplicate_w = await asyncio.open_connection("127.0.0.1", port, ssl=client_context)
+            await send_frame(duplicate_w, {"type": "hello", "token": one["token"], "name": "Duplicate"})
+            duplicate_error, _ = await read_frame(duplicate_r)
+            self.assertEqual("duplicate_session", duplicate_error["code"])
+            duplicate_w.close(); await duplicate_w.wait_closed()
 
             data_stream = io.BytesIO()
             with zipfile.ZipFile(data_stream, "w") as archive:
@@ -191,12 +258,12 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             digest = hashlib.sha256(data).hexdigest()
             await send_frame(one_w, {"type": "offer", "request_id": "r1", "recipient": two["code"],
                                      "filename": "payload.zip", "size": len(data), "sha256": digest})
-            created, _ = await read_frame(one_r)
-            offered, _ = await read_frame(two_r)
+            created, _ = await receive_type(one_r, "offer_created")
+            offered, _ = await receive_type(two_r, "incoming_offer")
             transfer_id = created["transfer_id"]
             self.assertEqual(transfer_id, offered["transfer_id"])
             await send_frame(two_w, {"type": "accept", "transfer_id": transfer_id})
-            accepted, _ = await read_frame(one_r)
+            accepted, _ = await receive_type(one_r, "accepted")
             self.assertEqual("accepted", accepted["type"])
             await send_frame(one_w, {"type": "chunk", "transfer_id": transfer_id}, data)
             upload_progress, _ = await receive_type(one_r, "transfer_progress")
@@ -204,7 +271,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(0, upload_progress["downloaded"])
             await send_frame(one_w, {"type": "finish", "transfer_id": transfer_id})
             ready, _ = await receive_type(two_r, "transfer_ready")
-            complete, _ = await read_frame(one_r)
+            complete, _ = await receive_type(one_r, "upload_complete")
             self.assertEqual("transfer_ready", ready["type"])
             self.assertEqual("upload_complete", complete["type"])
             await send_frame(two_w, {"type": "download", "transfer_id": transfer_id})

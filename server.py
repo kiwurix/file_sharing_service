@@ -15,11 +15,21 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from protocol import CHUNK_SIZE, read_frame, send_frame
+from protocol import CHUNK_SIZE, HEARTBEAT_TIMEOUT, read_frame, send_frame
 from logging_utils import configure_logging
 
 PAIR_LIMIT = 1024 ** 3
 MAX_CONNECTIONS = 5
+CLIENT_LOG_SIZE = 5 * 1024 * 1024
+CLIENT_LOG_BACKUPS = 3
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(CHUNK_SIZE), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 class RelayServer:
@@ -28,6 +38,8 @@ class RelayServer:
         self.root.mkdir(parents=True, exist_ok=True)
         self.files = self.root / "files"
         self.files.mkdir(exist_ok=True)
+        self.client_logs = self.root / "client_logs"
+        self.client_logs.mkdir(exist_ok=True)
         self.state_path = self.root / "state.json"
         self.log = configure_logging("file_sharing.server", self.root / "logs" / "server.log", console=True)
         self.state = self._load_state()
@@ -35,9 +47,20 @@ class RelayServer:
         self.writer_locks: dict[str, asyncio.Lock] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.progress_sent: dict[tuple[str, str], float] = {}
+        self._recover_interrupted_transfers()
         self.log.info("Relay state loaded: users=%d connections=%d pending_transfers=%d",
                       len(self.state["users"]), sum(len(items) for items in self.state["connections"].values()) // 2,
                       len(self.state["transfers"]))
+
+    def _recover_interrupted_transfers(self) -> None:
+        interrupted = [transfer_id for transfer_id, item in self.state["transfers"].items()
+                       if item.get("status") == "uploading"]
+        for transfer_id in interrupted:
+            (self.files / f"{transfer_id}.part").unlink(missing_ok=True)
+            self.state["transfers"].pop(transfer_id, None)
+        if interrupted:
+            self.save()
+            self.log.warning("Removed %d interrupted upload(s) during startup recovery", len(interrupted))
 
     def _load_state(self) -> dict:
         if self.state_path.exists():
@@ -89,8 +112,27 @@ class RelayServer:
             async with lock:
                 await send_frame(writer, message, payload)
             return True
-        except (ConnectionError, asyncio.CancelledError):
+        except (ConnectionError, OSError, ssl.SSLError, asyncio.CancelledError):
+            writer.close()
             return False
+
+    def append_client_logs(self, token: str, source: str, payload: bytes) -> None:
+        if not payload:
+            return
+        code = self.state["users"][token]["code"]
+        path = self.client_logs / f"client-{code}.log"
+        if path.exists() and path.stat().st_size + len(payload) > CLIENT_LOG_SIZE:
+            oldest = path.with_suffix(path.suffix + f".{CLIENT_LOG_BACKUPS}")
+            oldest.unlink(missing_ok=True)
+            for index in range(CLIENT_LOG_BACKUPS - 1, 0, -1):
+                current = path.with_suffix(path.suffix + f".{index}")
+                if current.exists():
+                    current.replace(path.with_suffix(path.suffix + f".{index + 1}"))
+            path.replace(path.with_suffix(path.suffix + ".1"))
+        safe_source = "".join(char for char in source if char.isalnum() or char in ".-_")[:40] or "client.log"
+        with path.open("ab") as stream:
+            stream.write(f"\n--- received {safe_source} ---\n".encode("utf-8"))
+            stream.write(payload.replace(b"\x00", b""))
 
     def pair_usage(self, one: str, two: str) -> int:
         pair = {one, two}
@@ -100,6 +142,12 @@ class RelayServer:
     async def initial_events(self, token: str) -> None:
         await self.tell(token, {"type": "connections", "items": [self.public_user(t) for t in self.user_connections(token)]})
         for transfer_id, item in list(self.state["transfers"].items()):
+            if item["sender"] == token:
+                if item["status"] == "offered":
+                    await self.tell(token, {"type": "offer_restored", "transfer_id": transfer_id,
+                                            "filename": item["filename"], "size": item["size"]})
+                elif item["status"] == "ready":
+                    await self.tell(token, {"type": "upload_complete", "transfer_id": transfer_id})
             if item["recipient"] != token:
                 continue
             event = dict(item)
@@ -113,22 +161,39 @@ class RelayServer:
             hello, _ = await read_frame(reader)
             if hello.get("type") != "hello":
                 raise ValueError("hello required")
-            token, user = self.allocate_user(hello.get("token"), str(hello.get("name", "User")))
+            requested_token = hello.get("token")
+            if requested_token and requested_token in self.online:
+                self.log.warning("Duplicate client session rejected: code=%s",
+                                 self.state["users"].get(requested_token, {}).get("code", "unknown"))
+                await send_frame(writer, {"type": "error", "code": "duplicate_session",
+                                          "message": "this identity is already connected"})
+                return
+            token, user = self.allocate_user(requested_token, str(hello.get("name", "User")))
             self.online[token] = writer
             self.writer_locks[token] = asyncio.Lock()
-            await self.tell(token, {"type": "welcome", "token": token, "code": user["code"], "name": user["name"]})
+            await self.tell(token, {"type": "welcome", "token": token, "code": user["code"], "name": user["name"],
+                                    "protocol_version": 2,
+                                    "capabilities": ["heartbeat", "client_logs", "state_sync"]})
             peer = writer.get_extra_info("peername")
             self.log.info("Client connected: code=%s address=%s", user["code"], peer[0] if peer else "unknown")
             await self.initial_events(token)
+            await self.tell(token, {"type": "sync_complete"})
             for peer in self.user_connections(token):
                 await self.tell(peer, {"type": "presence", "code": user["code"], "name": user["name"], "online": True})
             while True:
-                message, payload = await read_frame(reader)
+                message, payload = await asyncio.wait_for(read_frame(reader), timeout=HEARTBEAT_TIMEOUT)
+                if self.online.get(token) is not writer:
+                    break
                 try:
                     await self.dispatch(token, message, payload)
                 except (KeyError, TypeError, ValueError) as exc:
                     self.log.warning("Request rejected: code=%s reason=%s", user["code"], exc)
-                    await self.tell(token, {"type": "error", "message": str(exc)})
+                    await self.tell(token, {"type": "error", "code": "request_rejected", "message": str(exc),
+                                            "operation": message.get("type"), "request_id": message.get("request_id"),
+                                            "transfer_id": message.get("transfer_id")})
+        except asyncio.TimeoutError:
+            if token:
+                self.log.warning("Heartbeat timed out: code=%s", self.state["users"][token]["code"])
         except (asyncio.IncompleteReadError, ConnectionError, ssl.SSLError):
             pass
         except Exception as exc:
@@ -139,6 +204,7 @@ class RelayServer:
                 pass
         finally:
             if token and self.online.get(token) is writer:
+                await self.cancel_uploads(token)
                 self.online.pop(token, None)
                 self.writer_locks.pop(token, None)
                 for peer in self.user_connections(token):
@@ -146,7 +212,21 @@ class RelayServer:
                     await self.tell(peer, {"type": "presence", "code": user["code"], "name": user["name"], "online": False})
                 self.log.info("Client disconnected: code=%s", self.state["users"][token]["code"])
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError, ssl.SSLError):
+                pass
+
+    async def cancel_uploads(self, sender: str) -> None:
+        interrupted = [(transfer_id, item) for transfer_id, item in self.state["transfers"].items()
+                       if item["sender"] == sender and item["status"] == "uploading"]
+        for transfer_id, item in interrupted:
+            (self.files / f"{transfer_id}.part").unlink(missing_ok=True)
+            self.state["transfers"].pop(transfer_id, None)
+            await self.tell(item["recipient"], {"type": "transfer_cancelled", "transfer_id": transfer_id})
+            self.log.warning("Interrupted upload removed after disconnect: id=%s", transfer_id[:8])
+        if interrupted:
+            self.save()
 
     async def dispatch(self, token: str, message: dict, payload: bytes) -> None:
         kind = message.get("type")
@@ -178,8 +258,25 @@ class RelayServer:
             await self.download(token, message["transfer_id"])
         elif kind == "received":
             await self.received(token, message["transfer_id"])
+        elif kind == "ping":
+            await self.tell(token, {"type": "pong", "sent_at": message.get("sent_at"),
+                                    "connections": [self.public_user(peer) for peer in self.user_connections(token)]})
+        elif kind == "client_log":
+            self.append_client_logs(token, str(message.get("source", "client.log")), payload)
+        elif kind == "cancel":
+            await self.cancel_transfer(token, message["transfer_id"])
         else:
             raise ValueError("unknown message type")
+
+    async def cancel_transfer(self, sender: str, transfer_id: str) -> None:
+        item = self.state["transfers"].get(transfer_id)
+        if not item or item["sender"] != sender or item["status"] not in {"offered", "uploading"}:
+            return
+        (self.files / f"{transfer_id}.part").unlink(missing_ok=True)
+        self.state["transfers"].pop(transfer_id, None)
+        self.save()
+        await self.tell(item["recipient"], {"type": "transfer_cancelled", "transfer_id": transfer_id})
+        self.log.info("Transfer cancelled by sender: id=%s", transfer_id[:8])
 
     async def offer(self, sender: str, message: dict) -> None:
         recipient = self.state["codes"].get(str(message.get("recipient", "")))
@@ -243,15 +340,12 @@ class RelayServer:
         path = self.files / f"{transfer_id}.part"
         if not item or item["sender"] != sender or item["received_bytes"] != item["size"]:
             raise ValueError("incomplete upload")
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(CHUNK_SIZE), b""):
-                digest.update(block)
-        if digest.hexdigest() != item["sha256"]:
+        digest = await asyncio.to_thread(file_sha256, path)
+        if digest != item["sha256"]:
             path.unlink(missing_ok=True)
             self.state["transfers"].pop(transfer_id, None); self.save()
             raise ValueError("file checksum mismatch")
-        if not zipfile.is_zipfile(path):
+        if not await asyncio.to_thread(zipfile.is_zipfile, path):
             path.unlink(missing_ok=True)
             self.state["transfers"].pop(transfer_id, None); self.save()
             raise ValueError("the uploaded file is not a valid ZIP archive")

@@ -11,6 +11,7 @@ import os
 import queue
 import ssl
 import threading
+import time
 import uuid
 import zipfile
 from collections import deque
@@ -19,7 +20,7 @@ import tkinter as tk
 from tkinter import filedialog
 from tkinter import ttk
 
-from protocol import CHUNK_SIZE, read_frame, send_frame
+from protocol import CHUNK_SIZE, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, read_frame, send_frame
 from logging_utils import configure_logging
 
 try:
@@ -32,6 +33,15 @@ APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
 CONFIG_PATH = APP_DIR / "connections.json"
 DEFAULT_SERVER = "localhost"
 DEFAULT_PORT = 52007
+LOG_UPLOAD_CHUNK = 256 * 1024
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(CHUNK_SIZE), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def enable_high_dpi() -> None:
@@ -78,6 +88,7 @@ def friendly_error(message: str) -> str:
         (("checksum mismatch", "integrity check"), "The file did not arrive intact. It was removed; please send it again."),
         (("incomplete upload",), "The upload was interrupted before it finished. Please send the file again."),
         (("recipient is not a connection",), "That user is no longer in your connections. Add them again using their code."),
+        (("duplicate session", "already connected"), "This identity is already open on another computer. Close the other copy, then this app will reconnect automatically."),
     )
     for needles, friendly in translations:
         if any(needle in lowered for needle in needles):
@@ -120,10 +131,11 @@ def available_path(folder: str | Path, filename: str) -> Path:
 
 
 class NetworkClient:
-    def __init__(self, config: dict, events: queue.Queue, logger: logging.Logger):
+    def __init__(self, config: dict, events: queue.Queue, logger: logging.Logger, log_dir: Path):
         self.config = config
         self.events = events
         self.log = logger
+        self.log_dir = log_dir
         self.loop: asyncio.AbstractEventLoop | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.write_lock: asyncio.Lock | None = None
@@ -131,6 +143,12 @@ class NetworkClient:
         self.file_queue: deque[tuple[str, Path]] = deque()
         self.active_transfer: str | None = None
         self.downloads: dict[str, dict] = {}
+        self.authenticated = False
+        self.restored_outgoing = False
+        self.restored_incoming: set[str] = set()
+        self.log_offsets: dict[str, int] = {}
+        self.duplicate_session = False
+        self.capabilities: set[str] = set()
         self.thread = threading.Thread(target=self._thread_main, daemon=True)
 
     def start(self) -> None:
@@ -152,15 +170,17 @@ class NetworkClient:
     async def _run(self) -> None:
         self.loop = asyncio.get_running_loop()
         self.write_lock = asyncio.Lock()
+        retry_delay = 2
         while True:
+            heartbeat_task = None
             try:
                 self.log.info("Connecting to relay: address=%s port=%s", self.config["server"], self.config["port"])
                 context = ssl.create_default_context()
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
-                reader, self.writer = await asyncio.open_connection(
+                reader, self.writer = await asyncio.wait_for(asyncio.open_connection(
                     self.config["server"], int(self.config["port"]), ssl=context,
-                    server_hostname=self.config["server"], limit=CHUNK_SIZE + 65536)
+                    server_hostname=self.config["server"], limit=CHUNK_SIZE + 65536), timeout=10)
                 ssl_object = self.writer.get_extra_info("ssl_object")
                 fingerprint = hashlib.sha256(ssl_object.getpeercert(binary_form=True)).hexdigest()
                 pinned = self.config.get("server_fingerprint")
@@ -172,19 +192,72 @@ class NetworkClient:
                     save_config(self.config)
                     self.log.info("Server certificate pinned on first connection")
                 await self.send({"type": "hello", "token": self.config.get("token"), "name": self.config["name"]})
-                self.events.put({"type": "network", "online": True})
-                self.log.info("Relay connection established with TLS")
+                heartbeat_task = asyncio.create_task(self._heartbeat())
                 while True:
-                    message, payload = await read_frame(reader)
+                    timeout = 10 if not self.authenticated else HEARTBEAT_TIMEOUT + 2 if "heartbeat" in self.capabilities else None
+                    if timeout:
+                        message, payload = await asyncio.wait_for(read_frame(reader), timeout=timeout)
+                    else:
+                        message, payload = await read_frame(reader)
                     await self._handle(message, payload)
+                    if message.get("type") == "welcome":
+                        retry_delay = 2
             except Exception as exc:
-                self.events.put({"type": "network", "online": False, "message": str(exc)})
+                retry_delay = 15 if self.duplicate_session else min(10, retry_delay)
+                self.events.put({"type": "network", "online": False, "message": str(exc), "retry_in": retry_delay,
+                                 "duplicate": self.duplicate_session})
                 self.log.warning("Relay connection unavailable: %s", exc)
             finally:
+                self.authenticated = False
+                if heartbeat_task:
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except (asyncio.CancelledError, ConnectionError, OSError):
+                        pass
                 if self.writer:
                     self.writer.close()
                 self.writer = None
-            await asyncio.sleep(3)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(10, retry_delay + 2)
+            self.duplicate_session = False
+
+    async def _heartbeat(self) -> None:
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            if not self.authenticated:
+                continue
+            if "heartbeat" in self.capabilities:
+                await self.send({"type": "ping", "sent_at": time.monotonic()})
+            if "client_logs" in self.capabilities:
+                try:
+                    await self._send_log_delta()
+                except (OSError, ConnectionError) as exc:
+                    self.log.warning("Client log synchronization delayed: %s", exc)
+
+    async def _send_log_delta(self) -> None:
+        budget = LOG_UPLOAD_CHUNK
+        paths = [self.log_dir / f"client.log.{index}" for index in range(3, 0, -1)] + [self.log_dir / "client.log"]
+        for path in paths:
+            if budget <= 0:
+                break
+            if not path.exists():
+                continue
+            key = path.name
+            size = path.stat().st_size
+            offset = self.log_offsets.get(key, 0)
+            if size < offset:
+                offset = 0
+            if size == offset:
+                continue
+            amount = min(budget, size - offset)
+            with path.open("rb") as stream:
+                stream.seek(offset)
+                payload = stream.read(amount)
+            if payload:
+                await self.send({"type": "client_log", "source": key}, payload)
+                self.log_offsets[key] = offset + len(payload)
+                budget -= len(payload)
 
     async def _command(self, message: dict) -> None:
         kind = message.pop("type")
@@ -213,6 +286,15 @@ class NetworkClient:
                     self.writer.close()
         except Exception as exc:
             self.log.exception("Client command failed: command=%s", kind)
+            if kind == "queue_files":
+                self.pending_paths.clear()
+                self.active_transfer = None
+                self.events.put({"type": "sending_status", "text": "Connection changed — queued files will retry automatically"})
+                if self.writer:
+                    self.writer.close()
+                return
+            if kind == "accept" and message.get("transfer_id"):
+                self._discard_download(message["transfer_id"])
             self.events.put({"type": "error", "message": str(exc)})
 
     async def _offer_next(self) -> None:
@@ -224,12 +306,9 @@ class NetworkClient:
         self.active_transfer = request_id
         self.events.put({"type": "transfer_progress", "direction": "outgoing", "filename": path.name,
                          "uploaded": 0, "downloaded": 0, "size": path.stat().st_size})
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(CHUNK_SIZE), b""):
-                digest.update(block)
+        digest = await asyncio.to_thread(file_sha256, path)
         await self.send({"type": "offer", "request_id": request_id, "recipient": recipient,
-                         "filename": path.name, "size": path.stat().st_size, "sha256": digest.hexdigest()})
+                         "filename": path.name, "size": path.stat().st_size, "sha256": digest})
         self.log.info("Transfer offered: recipient=%s size=%d", recipient, path.stat().st_size)
         self.events.put({"type": "sending_status", "text": f"Waiting for {recipient} to accept {path.name}"})
 
@@ -253,15 +332,35 @@ class NetworkClient:
             self.log.info("Upload sent: id=%s size=%d", transfer_id[:8], size)
         except Exception as exc:
             self.log.exception("Upload failed: id=%s", transfer_id[:8])
-            self.events.put({"type": "error", "message": f"Upload failed: {exc}"})
-            await self._advance_queue()
+            self.pending_paths.pop(transfer_id, None)
+            self.active_transfer = None
+            self.events.put({"type": "sending_status", "text": "Upload interrupted — it will retry after reconnecting"})
+            if self.writer:
+                self.writer.close()
 
     async def _handle(self, message: dict, payload: bytes) -> None:
         kind = message.get("type")
         if kind == "welcome":
             self.config.update(token=message["token"], code=message["code"], name=message["name"])
             save_config(self.config)
-            await self._offer_next()
+            self.authenticated = True
+            self.capabilities = set(message.get("capabilities", []))
+            self.restored_outgoing = False
+            self.restored_incoming = set()
+            self.events.put({"type": "network", "online": True, "verified": "heartbeat" in self.capabilities})
+            self.log.info("Relay session authenticated: code=%s", message["code"])
+            if "state_sync" not in self.capabilities:
+                await self._offer_next()
+        elif kind == "pong":
+            latency = max(0, round((time.monotonic() - float(message.get("sent_at", time.monotonic()))) * 1000))
+            connections = message.get("connections", self.config["connections"])
+            changed = connections != self.config["connections"]
+            self.config["connections"] = connections
+            if changed:
+                save_config(self.config)
+            self.events.put({"type": "health", "latency_ms": latency})
+            if changed:
+                self.events.put({"type": "connections", "items": self.config["connections"]})
         elif kind == "connections":
             self.config["connections"] = message["items"]
             save_config(self.config)
@@ -279,6 +378,25 @@ class NetworkClient:
             path = self.pending_paths.pop(message["request_id"])
             self.pending_paths[message["transfer_id"]] = path
             self.active_transfer = message["transfer_id"]
+            self.restored_outgoing = True
+        elif kind == "offer_restored":
+            self.restored_outgoing = True
+            self.active_transfer = message["transfer_id"]
+            if self.file_queue:
+                self.pending_paths.clear()
+                self.pending_paths[message["transfer_id"]] = self.file_queue[0][1]
+                self.events.put({"type": "sending_status", "text": "Waiting for the receiver to accept the queued file"})
+            else:
+                await self.send({"type": "cancel", "transfer_id": message["transfer_id"]})
+                self.active_transfer = None
+        elif kind == "sync_complete":
+            for transfer_id in list(self.downloads):
+                if transfer_id not in self.restored_incoming:
+                    self._discard_download(transfer_id)
+            if self.active_transfer and not self.restored_outgoing:
+                self.pending_paths.clear()
+                self.active_transfer = None
+            await self._offer_next()
         elif kind == "accepted":
             path = self.pending_paths.get(message["transfer_id"])
             if path:
@@ -289,10 +407,15 @@ class NetworkClient:
             await self._advance_queue()
             return
         elif kind == "transfer_ready":
+            self.restored_incoming.add(message["transfer_id"])
             # A reconnect may deliver a completed accepted transfer.
             if message["transfer_id"] not in self.downloads:
                 self.events.put(message)
                 return
+            target = self.downloads[message["transfer_id"]]
+            target["stream"].close()
+            partial = target["destination"].with_suffix(target["destination"].suffix + ".part")
+            target.update(stream=partial.open("wb"), digest=hashlib.sha256(), received=0)
             await self.send({"type": "download", "transfer_id": message["transfer_id"]})
             self.events.put({"type": "transfer_progress", "direction": "incoming", "filename": message["filename"],
                              "uploaded": message["size"], "downloaded": 0, "size": message["size"]})
@@ -319,7 +442,37 @@ class NetworkClient:
                     self.log.info("Download verified and saved: id=%s size=%d", message["transfer_id"][:8], target["size"])
                     self.events.put({"type": "received_file", "path": str(destination)})
             return
+        elif kind == "transfer_cancelled":
+            self._discard_download(message["transfer_id"])
+            self.events.put({"type": "sending_status", "text": "Transfer interrupted — waiting for the sender to reconnect"})
+            return
+        elif kind == "error" and message.get("code") == "duplicate_session":
+            self.duplicate_session = True
+            self.events.put({"type": "error", "message": "duplicate session"})
+            if self.writer:
+                self.writer.close()
+            return
+        elif kind == "error" and message.get("code") == "request_rejected":
+            operation = message.get("operation")
+            if operation == "offer":
+                request_id = message.get("request_id")
+                self.pending_paths.pop(request_id, None)
+                self.active_transfer = None
+                if self.file_queue:
+                    self.file_queue.popleft()
+                await self._offer_next()
+            elif operation in {"accept", "download"} and message.get("transfer_id"):
+                self._discard_download(message["transfer_id"])
+            self.events.put(message)
+            return
         self.events.put(message)
+
+    def _discard_download(self, transfer_id: str) -> None:
+        target = self.downloads.pop(transfer_id, None)
+        if not target:
+            return
+        target["stream"].close()
+        target["destination"].with_suffix(target["destination"].suffix + ".part").unlink(missing_ok=True)
 
 
 class App:
@@ -351,7 +504,7 @@ class App:
             save_config(self.config)
             self.root.deiconify()
         self.events: queue.Queue = queue.Queue()
-        self.network = NetworkClient(self.config, self.events, self.log)
+        self.network = NetworkClient(self.config, self.events, self.log, APP_DIR / "logs")
         self.connection_rows: dict[str, tk.Frame] = {}
         self.selected_code: str | None = None
         self.is_online = False
@@ -516,10 +669,11 @@ class App:
         for item in self.config.get("connections", []):
             row = tk.Frame(self.connection_list, bg=self.PANEL, cursor="hand2")
             row.pack(fill="x", pady=self._p(2))
-            dot = "●"; color = self.GREEN if item.get("online") else self.RED
+            known = self.is_online
+            dot = "●"; color = self.GREEN if known and item.get("online") else self.RED if known else self.MUTED
             self._label(row, dot, 9, color).pack(side="left", padx=self._p((10, 8)), pady=self._p(10))
             self._label(row, item.get("name", "User"), 10).pack(side="left")
-            state = "Online" if item.get("online") else "Offline"
+            state = "Online" if known and item.get("online") else "Offline" if known else "Status unknown"
             self._label(row, f"{state}  ·  {item['code']}", 9, self.MUTED).pack(side="right", padx=self._p(10))
             for widget in (row, *row.winfo_children()):
                 widget.bind("<Button-1>", lambda _, code=item["code"], name=item.get("name", "User"): self._select(code, name))
@@ -661,12 +815,24 @@ class App:
                 if kind == "network":
                     online = event["online"]
                     self.is_online = online
-                    self.status.config(text="● Connected" if online else "● Server unavailable", fg=self.GREEN if online else self.RED)
+                    if online and event.get("verified", True):
+                        self.status.config(text="● Connected · checking…", fg=self.GREEN)
+                    elif online:
+                        self.status.config(text="● Connected", fg=self.GREEN)
+                    else:
+                        self.status.config(text="● Server unavailable", fg=self.RED)
                     if online:
                         if not self.network.file_queue:
                             self.activity.config(text="Ready to send files")
                     else:
-                        self.activity.config(text="Check your connection or server settings — retrying automatically")
+                        retry = event.get("retry_in", 3)
+                        if event.get("duplicate"):
+                            self.activity.config(text="This identity is open elsewhere — close the other copy to reconnect")
+                        else:
+                            self.activity.config(text=f"Server unavailable — retrying automatically in {retry} seconds")
+                    self._render_connections()
+                elif kind == "health":
+                    self.status.config(text=f"● Connected · {event['latency_ms']} ms", fg=self.GREEN)
                 elif kind == "welcome":
                     self.code_label.config(text=event["code"])
                 elif kind in {"connections", "connection_added", "presence"}:
