@@ -69,7 +69,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual("localhost", settings.server)
         self.assertEqual(52007, settings.port)
         with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
+            root = Path(folder).resolve()
             config = root / "client.toml"
             config.write_text('[client]\nserver="relay.example.test"\nport=51000\nstate_dir="./private"\n', 'utf-8')
             configured = ClientSettings.load(config)
