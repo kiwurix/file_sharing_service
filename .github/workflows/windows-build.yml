@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - deployment-and-windows-build
+      - main
     tags:
       - "v*"
 
@@ -17,6 +17,18 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            client/pyproject.toml
+            server/pyproject.toml
+            shared/pyproject.toml
+      - name: Test packages
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-dev.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -v
+          exit $LASTEXITCODE
       - name: Build executable
         shell: pwsh
         run: .\build_windows.ps1

@@ -1,0 +1,6 @@
+[client]
+server = "localhost"
+port = 52007
+language = "en"
+# Optional private identity and log directory, relative to this file.
+# state_dir = "./state"

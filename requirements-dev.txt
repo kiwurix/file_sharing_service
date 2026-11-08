@@ -1,1 +1,5 @@
+-e ./shared
+-e ./client
+-e ./server
 pyinstaller>=6.10
+build>=1.2

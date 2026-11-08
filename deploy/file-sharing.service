@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=user
-Group=user
+User=file-sharing
+Group=file-sharing
 WorkingDirectory=/opt/file-sharing
-ExecStart=/opt/file-sharing/.venv/bin/python /opt/file-sharing/server.py --host 0.0.0.0 --port 52007 --buffer /opt/file-sharing/buffer
+ExecStart=/opt/file-sharing/.venv/bin/python -m file_sharing_server --config /etc/file-sharing/server.toml
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

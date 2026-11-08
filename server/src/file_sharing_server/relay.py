@@ -2,24 +2,18 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
-import os
 import secrets
 import ssl
-import tempfile
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from protocol import CHUNK_SIZE, HEARTBEAT_TIMEOUT, read_frame, send_frame
-from logging_utils import configure_logging
+from file_sharing_common.config import write_json
+from file_sharing_common.protocol import HEARTBEAT_TIMEOUT, read_frame, send_frame
+from file_sharing_common.logging import LOG_BACKUPS, LOG_SIZE, configure_logging
 
 MAX_CONNECTIONS = 5
-CLIENT_LOG_SIZE = 5 * 1024 * 1024
-CLIENT_LOG_BACKUPS = 3
-
 
 class RelayServer:
     def __init__(self, buffer_dir: Path):
@@ -55,14 +49,7 @@ class RelayServer:
         return {"users": {}, "codes": {}, "connections": {}, "transfers": {}}
 
     def save(self) -> None:
-        fd, name = tempfile.mkstemp(dir=self.root, prefix="state-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.state, stream, indent=2)
-            os.replace(name, self.state_path)
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
+        write_json(self.state_path, self.state)
 
     def user_connections(self, token: str) -> list[str]:
         return list(self.state["connections"].get(token, []))
@@ -90,41 +77,35 @@ class RelayServer:
         self.log.info("New client registered: code=%s", code)
         return token, user
 
-    async def tell(self, token: str, message: dict, payload: bytes = b"") -> bool:
-        writer = self.online.get(token)
+    async def _tell(self, token: str, message: dict, payload: bytes, *, data: bool) -> bool:
+        writers = self.data_online if data else self.online
+        locks = self.data_writer_locks if data else self.writer_locks
+        writer = writers.get(token)
         if not writer:
             return False
         try:
-            lock = self.writer_locks.setdefault(token, asyncio.Lock())
-            async with lock:
+            async with locks.setdefault(token, asyncio.Lock()):
                 await send_frame(writer, message, payload)
             return True
         except (ConnectionError, OSError, ssl.SSLError, asyncio.CancelledError):
             writer.close()
             return False
 
+    async def tell(self, token: str, message: dict, payload: bytes = b"") -> bool:
+        return await self._tell(token, message, payload, data=False)
+
     async def tell_data(self, token: str, message: dict, payload: bytes = b"") -> bool:
-        writer = self.data_online.get(token)
-        if not writer:
-            return False
-        try:
-            lock = self.data_writer_locks.setdefault(token, asyncio.Lock())
-            async with lock:
-                await send_frame(writer, message, payload)
-            return True
-        except (ConnectionError, OSError, ssl.SSLError, asyncio.CancelledError):
-            writer.close()
-            return False
+        return await self._tell(token, message, payload, data=True)
 
     def append_client_logs(self, token: str, source: str, payload: bytes) -> None:
         if not payload:
             return
         code = self.state["users"][token]["code"]
         path = self.client_logs / f"client-{code}.log"
-        if path.exists() and path.stat().st_size + len(payload) > CLIENT_LOG_SIZE:
-            oldest = path.with_suffix(path.suffix + f".{CLIENT_LOG_BACKUPS}")
+        if path.exists() and path.stat().st_size + len(payload) > LOG_SIZE:
+            oldest = path.with_suffix(path.suffix + f".{LOG_BACKUPS}")
             oldest.unlink(missing_ok=True)
-            for index in range(CLIENT_LOG_BACKUPS - 1, 0, -1):
+            for index in range(LOG_BACKUPS - 1, 0, -1):
                 current = path.with_suffix(path.suffix + f".{index}")
                 if current.exists():
                     current.replace(path.with_suffix(path.suffix + f".{index + 1}"))
@@ -379,49 +360,3 @@ class RelayServer:
         self.state["transfers"].pop(transfer_id, None); self.save()
         self.log.info("Transfer delivery acknowledged: id=%s", transfer_id[:8])
         await self.tell(item["sender"], {"type": "delivered", "transfer_id": transfer_id})
-
-
-def ensure_certificate(root: Path) -> tuple[Path, Path]:
-    cert, key = root / "server-cert.pem", root / "server-key.pem"
-    if cert.exists() and key.exists():
-        return cert, key
-    try:
-        from cryptography import x509
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.x509.oid import NameOID
-    except ImportError as exc:
-        raise RuntimeError("Install dependencies first: pip install -r requirements.txt") from exc
-    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "File Sharing Relay")])
-    now = datetime.now(timezone.utc)
-    certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(private.public_key())
-                   .serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=1))
-                   .not_valid_after(now + timedelta(days=3650)).add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
-                   .sign(private, hashes.SHA256()))
-    key.write_bytes(private.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
-    key.chmod(0o600)
-    cert.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
-    return cert, key
-
-
-async def run(host: str, port: int, buffer_dir: Path) -> None:
-    relay = RelayServer(buffer_dir)
-    cert, key = ensure_certificate(relay.root)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_cert_chain(cert, key)
-    server = await asyncio.start_server(relay.handle, host, port, ssl=context, limit=CHUNK_SIZE + 65536)
-    relay.log.info("TLS relay listening: host=%s port=%d buffer=%s", host, port, relay.root)
-    print(f"File Sharing relay listening on {host}:{port} (TLS)")
-    async with server:
-        await server.serve_forever()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="File Sharing TLS relay")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=52007)
-    parser.add_argument("--buffer", type=Path, default=Path(__file__).with_name("buffer"))
-    args = parser.parse_args()
-    asyncio.run(run(args.host, args.port, args.buffer))

@@ -1,188 +1,88 @@
 # File Sharing Service
 
-Encrypted ZIP-file sharing with a lightweight desktop client and a persistent relay server.
+A Python desktop app for sending ZIP files through a TLS relay.
 
-## Features
+- Three-digit contact codes and saved connections
+- Drag-and-drop file selection and transfer queues
+- Streaming transfers with SHA-256 verification
+- Certificate pinning, heartbeat and automatic reconnect
+- English and Russian interface
 
-- Stable three-digit user codes
-- Nicknames with green/red online indicators
-- Drag-and-drop or Explorer file selection
-- Sequential multi-file sending
-- Simultaneous transfers in both directions
-- English and Russian interface with a saved language preference
-- TLS-encrypted traffic with certificate pinning
-- SHA-256 integrity verification
-- Single-pass sending: SHA-256 is calculated while bytes are already being streamed
-- Separate TCP+TLS control and file-data channels with bounded backpressure and no server-side file buffer
-- Maximum five connections per user
-- Monotonic streamed/delivered progress with network updates throttled to once per second
-- DPI-aware, resolution-adaptive interface from laptop displays through 4K
-- Three-second heartbeat with automatic presence repair and reconnect recovery
-- One desktop instance per Windows user session
-- ZIP files only
+## Structure
 
-## Project layout
-
-| Path | Purpose |
+| Package | Responsibility |
 | --- | --- |
-| `server.py` | TLS streaming relay, identity registry, and connections |
-| `client.py` | Desktop interface and network client |
-| `protocol.py` | Shared framed network protocol |
-| `main.py` | Client entry point |
-| `tests/` | Unit and end-to-end TLS transfer tests |
-| `buffer/` | Runtime-only server state, certificate, key, logs, and client diagnostics |
+| `client/` | Desktop UI, network client, local settings and identity |
+| `server/` | Relay, persistent identity registry and TLS certificate |
+| `shared/` | Framed protocol, rotating logs and configuration helpers |
 
-## Logs
+The client and server are independently installable applications. Both depend on the same small shared package. UI, networking, translations and persistence are separate modules.
 
-- Server: `buffer/logs/server.log`
-- Client: `%LOCALAPPDATA%\file_sharing\logs\client.log`
-- Uploaded client diagnostics: `buffer/client_logs/client-<code>.log`
+## Install
 
-Logs rotate at 5 MiB and retain three backups. They include startup, connection state, rejected requests, transfer milestones, integrity checks, delivery, and cleanup. While connected, each client sends its current and rotated diagnostic logs to the relay in throttled 256 KiB batches. The server stores them by three-digit client code so an operator can investigate both sides of a failure. Identity tokens, certificate fingerprints, and file contents are never logged.
+Requires Python 3.11+. Create and activate a virtual environment first.
 
-## Server deployment
-
-Requirements:
-
-- Python 3.11 or newer
-- One writable directory for this project
-- Inbound TCP port `52007`
-
-On Linux:
+For the client, install Tkinter through your Python installation, then run:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python server.py --host 0.0.0.0 --port 52007 --buffer ./buffer
+python -m pip install ./shared ./client
 ```
 
-On Windows Server:
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe server.py --host 0.0.0.0 --port 52007 --buffer .\buffer
-```
-
-The server keeps its persistent runtime data in `buffer/` inside this project. The directory is excluded by `.gitignore`. The first start creates:
-
-- `state.json`: user identities, codes, nicknames, connections, and transfer metadata
-- `server-cert.pem`: self-signed TLS certificate
-- `server-key.pem`: private TLS key
-- `client_logs/`: rotating diagnostics uploaded by clients, grouped by client code
-
-File payloads are never stored on the relay. Each client keeps a lightweight control channel for heartbeat, presence, offers, progress, and receipts, plus an independent data channel used only for file chunks. TCP flow control slows the sender when the receiver is slower, while heartbeat latency remains independent from upload congestion inside the application.
-
-Do not delete or replace `state.json`, `server-cert.pem`, or `server-key.pem` during normal updates. Deleting `state.json` resets every user code and connection. Replacing the certificate causes existing clients to reject the server until their saved certificate pin is reset.
-
-### systemd service
-
-The repository includes `deploy/file-sharing.service`, configured to run as the local `user` account from `/opt/file-sharing`. It is intended for manual, on-demand startup and is not enabled at boot by default:
-
-```ini
-[Unit]
-Description=File Sharing Relay
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=user
-Group=user
-WorkingDirectory=/opt/file-sharing
-ExecStart=/opt/file-sharing/.venv/bin/python /opt/file-sharing/server.py --host 0.0.0.0 --port 52007 --buffer /opt/file-sharing/buffer
-Restart=on-failure
-RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Install it as `/etc/systemd/system/file-sharing.service`, then start it when needed:
+For the server:
 
 ```bash
-sudo install -m 644 deploy/file-sharing.service /etc/systemd/system/file-sharing.service
-sudo systemctl daemon-reload
-sudo systemctl start file-sharing
-sudo systemctl status file-sharing
+python -m pip install ./shared ./server
 ```
 
-Stop the relay when it is not needed:
+## Configure and run
+
+Copy `client/config.example.toml` to `client/config.toml` and set `server` to your relay hostname or address. Start the client:
 
 ```bash
-sudo systemctl stop file-sharing
+python -m file_sharing_client --config client/config.toml
 ```
 
-View logs with:
+Copy `server/config.example.toml` to `server/config.toml` and choose the listening interface, port and persistent data directory. Allow inbound TCP traffic on the configured port. Start the relay:
 
 ```bash
-journalctl -u file-sharing -f
+python -m file_sharing_server --config server/config.toml
 ```
 
-## Client setup
+Configuration paths are explicit. Paths inside a TOML file are relative to that file, independent of the working directory. Real config files are ignored by Git. The committed examples use local addresses.
 
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe main.py
-```
+On the first client launch, choose a nickname. Use **Profile & server** to change the relay, language or nickname. **Use default** restores the relay from the local configuration.
 
-On first launch, enter a nickname. The client uses a built-in relay. Open **Profile & server** to enter a custom relay or use **Use default** to restore the built-in address without displaying it, then save and reconnect.
+## State and updates
 
-### Windows executable
+The client keeps its existing identity in `%LOCALAPPDATA%/file_sharing/connections.json`. Set `state_dir` in the client config to choose another directory. Saved identities, contacts and certificate pins are preserved. A configured relay change resets the pin for the new endpoint.
 
-Build the standalone GUI client on Windows with:
+The server stores `state.json`, `server-cert.pem`, `server-key.pem` and logs in `data_dir`. Keep this directory when updating. Existing deployments should point `data_dir` at their current buffer directory to preserve user codes, contacts and certificates.
+
+Logs rotate at 5 MiB with three backups. Clients upload diagnostic log batches to the relay. File contents, identity tokens and certificate fingerprints are excluded from log messages.
+
+`deploy/file-sharing.service` is a Linux systemd template using a dedicated `file-sharing` account, `/opt/file-sharing` installation and `/etc/file-sharing/server.toml` configuration. Set `data_dir` to a directory writable by that account before starting the service.
+
+## Windows build
 
 ```powershell
 .\build_windows.ps1
 ```
 
-The output is `dist\FileSharing.exe` with its SHA-256 checksum in `dist\FileSharing.exe.sha256`. The GitHub Actions workflow **Build Windows client** produces the same files for manual runs and version tags.
+Output: `dist/FileSharing.exe` and its SHA-256 checksum. Run it with `--config` pointing to your private client TOML file. The **Build Windows client** workflow runs the tests and produces the executable.
 
-Client state is stored at:
-
-```text
-%LOCALAPPDATA%\file_sharing\connections.json
-```
-
-This file contains the stable client token, assigned code, nickname, server certificate fingerprint, and cached connections. Back it up if the client identity must survive an OS reinstall.
-
-Changing IP addresses does not affect identities or connections. They remain stable while both the client `connections.json` and server `buffer/state.json` are preserved.
-
-The sidebar connection indicator is authoritative only while the client shows **Connected**. A heartbeat runs every three seconds and refreshes the full connection presence list; if no server traffic is received for ten seconds, the client immediately changes to **Server unavailable** and reconnects automatically. Interrupted streams are retried from the beginning after state synchronization. Transfers require both clients to remain online; the relay does not retain completed files.
-
-When deploying this protocol version, update and restart the server before distributing the new client. New clients can still connect to an older relay, but heartbeat verification, state repair, and client-log upload remain unavailable until the relay is upgraded.
-
-## Validation
-
-Run the complete test suite:
+## Development
 
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m unittest discover -v
 ```
 
-The suite verifies identity persistence, code stability, TLS certificate generation, ZIP validation, framed transport, progress throttling, and the complete offer/stream/receipt lifecycle.
-
-## Backup and updates
-
-1. Stop the relay.
-2. Back up the entire `buffer/` directory.
-3. Update the Python source files and dependencies.
-4. Keep the existing `buffer/` directory unchanged.
-5. Run the tests.
-6. Restart the relay and inspect its logs.
-
-Transfer metadata may change while the service is running, so do not copy or modify `buffer/` during a live backup.
+The tests use temporary state directories and cover persistence, framing, TLS, progress throttling and relay transfers.
 
 ## Operating rules for automation agents
 
-- Treat `buffer/` as persistent production data.
-- Never regenerate identity state or TLS keys unless explicitly requested.
-- Never expose `server-key.pem` or client tokens in logs.
-- Do not manually edit `state.json` while the server is running.
-- Use a temporary directory for tests; tests must not point at the production buffer.
-- Preserve `connections.json` during client updates.
-- Confirm the configured port is reachable after deployment.
-- Verify the test suite before restarting production after an update.
+- Treat server and client state directories as private persistent data.
+- Preserve `state.json`, `connections.json`, certificates and keys during updates.
+- Use temporary directories for tests.
+- Keep real configuration, keys, tokens, state and logs out of Git.
+- Deployment and service restarts require an explicit request.

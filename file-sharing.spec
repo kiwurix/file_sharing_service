@@ -5,7 +5,7 @@ datas = collect_data_files("tkinterdnd2")
 binaries = collect_dynamic_libs("tkinterdnd2")
 
 a = Analysis(
-    ["main.py"],
+    ["client/src/file_sharing_client/__main__.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,

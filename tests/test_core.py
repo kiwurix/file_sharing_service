@@ -13,12 +13,16 @@ import logging
 from pathlib import Path
 from unittest import mock
 
-from protocol import read_frame, send_frame
-from server import RelayServer, ensure_certificate
-import client
-from client import DEFAULT_PORT, DEFAULT_SERVER, calculate_display_metrics, friendly_error
-from logging_utils import configure_logging
-from single_instance import SingleInstanceGuard
+from file_sharing_common.protocol import read_frame, send_frame
+from file_sharing_server.relay import RelayServer
+from file_sharing_server.tls import ensure_certificate
+from file_sharing_server.config import ServerSettings
+from file_sharing_client.config import ClientSettings, StateStore
+from file_sharing_client.display import calculate_display_metrics
+from file_sharing_client.i18n import STRINGS, friendly_error, translate
+from file_sharing_client.network import NetworkClient
+from file_sharing_common.logging import configure_logging
+from file_sharing_client.single_instance import SingleInstanceGuard
 
 
 class CoreTests(unittest.TestCase):
@@ -60,37 +64,70 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(1, sum(isinstance(handler, logging.handlers.RotatingFileHandler)
                                     for handler in logger.handlers))
 
-    def test_production_server_defaults(self):
-        self.assertEqual("localhost", DEFAULT_SERVER)
-        self.assertEqual(52007, DEFAULT_PORT)
+    def test_local_server_defaults(self):
+        settings = ClientSettings()
+        self.assertEqual("localhost", settings.server)
+        self.assertEqual(52007, settings.port)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "client.toml"
+            config.write_text('[client]\nserver="relay.example.test"\nport=51000\nstate_dir="./private"\n', 'utf-8')
+            configured = ClientSettings.load(config)
+            self.assertEqual("relay.example.test", configured.server)
+            self.assertEqual(51000, configured.port)
+            self.assertEqual(root / "private", configured.state_dir)
+            config.write_text('[client]\nport=70000\n', 'utf-8')
+            with self.assertRaises(ValueError):
+                ClientSettings.load(config)
+            config.write_text('[client]\nserver_typo="localhost"\n', 'utf-8')
+            with self.assertRaises(ValueError):
+                ClientSettings.load(config)
+            with self.assertRaises(FileNotFoundError):
+                ClientSettings.load(root / "missing.toml")
+            config.write_text('[server]\nhost="localhost"\nport=51001\ndata_dir="./buffer"\n', 'utf-8')
+            server_settings = ServerSettings.load(config)
+            self.assertEqual(root / "buffer", server_settings.data_dir)
+            self.assertEqual(51001, server_settings.port)
 
     def test_saved_relay_mode_distinguishes_default_from_manual_address(self):
         with tempfile.TemporaryDirectory() as folder:
             config_path = Path(folder) / "connections.json"
             config_path.write_text(json.dumps({
-                "server": DEFAULT_SERVER,
-                "port": DEFAULT_PORT,
+                "server": "localhost",
+                "port": 52007,
                 "use_default_server": False,
+                "token": "saved-test-identity", "server_fingerprint": "saved-test-pin",
             }), "utf-8")
-            with mock.patch.object(client, "APP_DIR", Path(folder)), mock.patch.object(client, "CONFIG_PATH", config_path):
-                config = client.load_config()
+            store = StateStore(ClientSettings(server="relay.example.test", state_dir=Path(folder), configured=True))
+            config = store.load()
+            store.save(config)
+            self.assertEqual(config, store.load())
         self.assertFalse(config["use_default_server"])
+        self.assertEqual("localhost", config["server"])
+        self.assertEqual("saved-test-identity", config["token"])
+        self.assertEqual("saved-test-pin", config["server_fingerprint"])
 
     def test_legacy_default_address_uses_masked_default_mode(self):
         with tempfile.TemporaryDirectory() as folder:
             config_path = Path(folder) / "connections.json"
-            config_path.write_text(json.dumps({"server": DEFAULT_SERVER, "port": DEFAULT_PORT}), "utf-8")
-            with mock.patch.object(client, "APP_DIR", Path(folder)), mock.patch.object(client, "CONFIG_PATH", config_path):
-                config = client.load_config()
+            config_path.write_text(json.dumps({"server": "localhost", "port": 52007}), "utf-8")
+            config = StateStore(ClientSettings(state_dir=Path(folder))).load()
         self.assertTrue(config["use_default_server"])
         self.assertEqual("en", config["language"])
+        with tempfile.TemporaryDirectory() as folder:
+            store = StateStore(ClientSettings(server="relay.example.test", state_dir=Path(folder), configured=True))
+            store.save({"server": "localhost", "port": 52007, "use_default_server": True,
+                        "token": "saved-test-identity", "server_fingerprint": "saved-test-pin"})
+            changed = store.load()
+            self.assertEqual("relay.example.test", changed["server"])
+            self.assertIsNone(changed["server_fingerprint"])
+            self.assertEqual("saved-test-identity", changed["token"])
 
     def test_saved_language_is_loaded(self):
         with tempfile.TemporaryDirectory() as folder:
             config_path = Path(folder) / "connections.json"
             config_path.write_text(json.dumps({"language": "ru"}), "utf-8")
-            with mock.patch.object(client, "APP_DIR", Path(folder)), mock.patch.object(client, "CONFIG_PATH", config_path):
-                config = client.load_config()
+            config = StateStore(ClientSettings(state_dir=Path(folder))).load()
         self.assertEqual("ru", config["language"])
 
     def test_technical_errors_are_user_friendly(self):
@@ -100,9 +137,9 @@ class CoreTests(unittest.TestCase):
         self.assertIn("сервер", friendly_error("not connected", "ru").lower())
 
     def test_localizations_have_matching_keys(self):
-        self.assertEqual(set(client.STRINGS["en"]), set(client.STRINGS["ru"]))
-        self.assertEqual("Выберите контакт", client.translate("ru", "choose_connection"))
-        self.assertEqual("Choose a connection", client.translate("unsupported", "choose_connection"))
+        self.assertEqual(set(STRINGS["en"]), set(STRINGS["ru"]))
+        self.assertEqual("Выберите контакт", translate("ru", "choose_connection"))
+        self.assertEqual("Choose a connection", translate("unsupported", "choose_connection"))
 
     def test_display_metrics_adapt_and_remain_bounded(self):
         laptop = calculate_display_metrics(1366, 768, 1.0)
@@ -166,7 +203,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             log_dir.mkdir()
             (log_dir / "client.log").write_text("diagnostic line\n", "utf-8")
             logger = configure_logging("file_sharing.client-test", log_dir / "local-test.log")
-            network = client.NetworkClient({}, queue.Queue(), logger, log_dir)
+            network = NetworkClient({}, queue.Queue(), logger, log_dir, save_state=mock.Mock())
             sent = []
 
             async def capture(message, payload=b""):
@@ -192,7 +229,7 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
 
             relay.tell = capture
             relay.tell_data = capture
-            with mock.patch("server.time.monotonic", side_effect=[10.0, 10.2]):
+            with mock.patch("file_sharing_server.relay.time.monotonic", side_effect=[10.0, 10.2]):
                 await relay.chunk("one", "transfer", b"a")
                 await relay.chunk("one", "transfer", b"b")
             chunks = [message for _, message in messages if message["type"] == "download_chunk"]
@@ -229,6 +266,18 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
             client_context = ssl.create_default_context()
             client_context.check_hostname = False
             client_context.verify_mode = ssl.CERT_NONE
+
+            network_config = {"server": "127.0.0.1", "port": port, "server_fingerprint": None}
+            network = NetworkClient(network_config, queue.Queue(), relay.log, root / "probe-logs",
+                                    save_state=mock.Mock())
+            _, probe = await network._open_connection()
+            self.assertEqual(hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.read_text())).hexdigest(),
+                             network_config["server_fingerprint"])
+            probe.close()
+            await probe.wait_closed()
+            network_config["server_fingerprint"] = "wrong-test-pin"
+            with self.assertRaises(ssl.SSLError):
+                await network._open_connection()
 
             async def connect(name):
                 reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=client_context)
